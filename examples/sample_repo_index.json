@@ -1,0 +1,342 @@
+[
+  {
+    "chunk_id": "calculator.py::Calculator::class:5-39",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "class",
+    "name": "Calculator",
+    "class_name": null,
+    "signature": "class Calculator:",
+    "docstring": "A basic calculator that keeps a running history.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "class Calculator:\n    \"\"\"A basic calculator that keeps a running history.\"\"\"\n\n    def __init__(self):\n        self.history: List[str] = []\n\n    def add(self, a: float, b: float) -> float:\n        \"\"\"Add two numbers and record the operation.\"\"\"\n        result = a + b\n        self.history.append(f\"{a} + {b} = {result}\")\n        return result\n\n    def subtract(self, a: float, b: float) -> float:\n        \"\"\"Subtract b from a and record the operation.\"\"\"\n        result = a - b\n        self.history.append(f\"{a} - {b} = {result}\")\n        return result\n\n    def multiply(self, a: float, b: float) -> float:\n        \"\"\"Multiply two numbers and record the operation.\"\"\"\n        result = a * b\n        self.history.append(f\"{a} * {b} = {result}\")\n        return result\n\n    def divide(self, a: float, b: float) -> float:\n        \"\"\"Divide a by b and record the operation.\"\"\"\n        if b == 0:\n            raise ZeroDivisionError(\"cannot divide by zero\")\n        result = a / b\n        self.history.append(f\"{a} / {b} = {result}\")\n        return result\n\n    def clear_history(self) -> None:\n        \"\"\"Clear the recorded operation history.\"\"\"\n        self.history.clear()",
+    "start_line": 5,
+    "end_line": 39
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.__init__::method:8-9",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "__init__",
+    "class_name": "Calculator",
+    "signature": "def __init__(self):",
+    "docstring": null,
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def __init__(self):\n        self.history: List[str] = []",
+    "start_line": 8,
+    "end_line": 9
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.add::method:11-15",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "add",
+    "class_name": "Calculator",
+    "signature": "def add(self, a: float, b: float) -> float:",
+    "docstring": "Add two numbers and record the operation.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def add(self, a: float, b: float) -> float:\n        \"\"\"Add two numbers and record the operation.\"\"\"\n        result = a + b\n        self.history.append(f\"{a} + {b} = {result}\")\n        return result",
+    "start_line": 11,
+    "end_line": 15
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.subtract::method:17-21",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "subtract",
+    "class_name": "Calculator",
+    "signature": "def subtract(self, a: float, b: float) -> float:",
+    "docstring": "Subtract b from a and record the operation.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def subtract(self, a: float, b: float) -> float:\n        \"\"\"Subtract b from a and record the operation.\"\"\"\n        result = a - b\n        self.history.append(f\"{a} - {b} = {result}\")\n        return result",
+    "start_line": 17,
+    "end_line": 21
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.multiply::method:23-27",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "multiply",
+    "class_name": "Calculator",
+    "signature": "def multiply(self, a: float, b: float) -> float:",
+    "docstring": "Multiply two numbers and record the operation.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def multiply(self, a: float, b: float) -> float:\n        \"\"\"Multiply two numbers and record the operation.\"\"\"\n        result = a * b\n        self.history.append(f\"{a} * {b} = {result}\")\n        return result",
+    "start_line": 23,
+    "end_line": 27
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.divide::method:29-35",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "divide",
+    "class_name": "Calculator",
+    "signature": "def divide(self, a: float, b: float) -> float:",
+    "docstring": "Divide a by b and record the operation.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def divide(self, a: float, b: float) -> float:\n        \"\"\"Divide a by b and record the operation.\"\"\"\n        if b == 0:\n            raise ZeroDivisionError(\"cannot divide by zero\")\n        result = a / b\n        self.history.append(f\"{a} / {b} = {result}\")\n        return result",
+    "start_line": 29,
+    "end_line": 35
+  },
+  {
+    "chunk_id": "calculator.py::Calculator.clear_history::method:37-39",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "method",
+    "name": "clear_history",
+    "class_name": "Calculator",
+    "signature": "def clear_history(self) -> None:",
+    "docstring": "Clear the recorded operation history.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def clear_history(self) -> None:\n        \"\"\"Clear the recorded operation history.\"\"\"\n        self.history.clear()",
+    "start_line": 37,
+    "end_line": 39
+  },
+  {
+    "chunk_id": "calculator.py::average::function:42-44",
+    "file_path": "calculator.py",
+    "language": "python",
+    "type": "function",
+    "name": "average",
+    "class_name": null,
+    "signature": "def average(values: List[float]) -> float:",
+    "docstring": "Return the arithmetic mean of values.",
+    "imports": [
+      "from typing import List"
+    ],
+    "source_code": "def average(values: List[float]) -> float:\n    \"\"\"Return the arithmetic mean of values.\"\"\"\n    return sum(values) / len(values)",
+    "start_line": 42,
+    "end_line": 44
+  },
+  {
+    "chunk_id": "user.py::User::class:5-25",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "class",
+    "name": "User",
+    "class_name": null,
+    "signature": "class User:",
+    "docstring": "Represents an application user.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "class User:\n    \"\"\"Represents an application user.\"\"\"\n\n    def __init__(self, user_id: int, first_name: str, last_name: str, email: str):\n        self.user_id = user_id\n        self.first_name = first_name\n        self.last_name = last_name\n        self.email = email\n\n    @property\n    def full_name(self) -> str:\n        \"\"\"Return the user's full name.\"\"\"\n        return f\"{self.first_name} {self.last_name}\"\n\n    def to_dict(self) -> Dict:\n        \"\"\"Serialize the user to a plain dict.\"\"\"\n        return {\n            \"user_id\": self.user_id,\n            \"full_name\": self.full_name,\n            \"email\": self.email,\n        }",
+    "start_line": 5,
+    "end_line": 25
+  },
+  {
+    "chunk_id": "user.py::User.__init__::method:8-12",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "__init__",
+    "class_name": "User",
+    "signature": "def __init__(self, user_id: int, first_name: str, last_name: str, email: str):",
+    "docstring": null,
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def __init__(self, user_id: int, first_name: str, last_name: str, email: str):\n        self.user_id = user_id\n        self.first_name = first_name\n        self.last_name = last_name\n        self.email = email",
+    "start_line": 8,
+    "end_line": 12
+  },
+  {
+    "chunk_id": "user.py::User.full_name::method:14-17",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "full_name",
+    "class_name": "User",
+    "signature": "def full_name(self) -> str:",
+    "docstring": "Return the user's full name.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "@property\n    def full_name(self) -> str:\n        \"\"\"Return the user's full name.\"\"\"\n        return f\"{self.first_name} {self.last_name}\"",
+    "start_line": 14,
+    "end_line": 17
+  },
+  {
+    "chunk_id": "user.py::User.to_dict::method:19-25",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "to_dict",
+    "class_name": "User",
+    "signature": "def to_dict(self) -> Dict:",
+    "docstring": "Serialize the user to a plain dict.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def to_dict(self) -> Dict:\n        \"\"\"Serialize the user to a plain dict.\"\"\"\n        return {\n            \"user_id\": self.user_id,\n            \"full_name\": self.full_name,\n            \"email\": self.email,\n        }",
+    "start_line": 19,
+    "end_line": 25
+  },
+  {
+    "chunk_id": "user.py::UserRepository::class:28-44",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "class",
+    "name": "UserRepository",
+    "class_name": null,
+    "signature": "class UserRepository:",
+    "docstring": "A minimal in-memory store for User objects.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "class UserRepository:\n    \"\"\"A minimal in-memory store for User objects.\"\"\"\n\n    def __init__(self):\n        self._users: Dict[int, User] = {}\n\n    def add(self, user: User) -> None:\n        \"\"\"Add or replace a user by id.\"\"\"\n        self._users[user.user_id] = user\n\n    def get(self, user_id: int) -> Optional[User]:\n        \"\"\"Look up a user by id, or None if missing.\"\"\"\n        return self._users.get(user_id)\n\n    def all(self) -> List[User]:\n        \"\"\"Return every stored user.\"\"\"\n        return list(self._users.values())",
+    "start_line": 28,
+    "end_line": 44
+  },
+  {
+    "chunk_id": "user.py::UserRepository.__init__::method:31-32",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "__init__",
+    "class_name": "UserRepository",
+    "signature": "def __init__(self):",
+    "docstring": null,
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def __init__(self):\n        self._users: Dict[int, User] = {}",
+    "start_line": 31,
+    "end_line": 32
+  },
+  {
+    "chunk_id": "user.py::UserRepository.add::method:34-36",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "add",
+    "class_name": "UserRepository",
+    "signature": "def add(self, user: User) -> None:",
+    "docstring": "Add or replace a user by id.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def add(self, user: User) -> None:\n        \"\"\"Add or replace a user by id.\"\"\"\n        self._users[user.user_id] = user",
+    "start_line": 34,
+    "end_line": 36
+  },
+  {
+    "chunk_id": "user.py::UserRepository.get::method:38-40",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "get",
+    "class_name": "UserRepository",
+    "signature": "def get(self, user_id: int) -> Optional[User]:",
+    "docstring": "Look up a user by id, or None if missing.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def get(self, user_id: int) -> Optional[User]:\n        \"\"\"Look up a user by id, or None if missing.\"\"\"\n        return self._users.get(user_id)",
+    "start_line": 38,
+    "end_line": 40
+  },
+  {
+    "chunk_id": "user.py::UserRepository.all::method:42-44",
+    "file_path": "user.py",
+    "language": "python",
+    "type": "method",
+    "name": "all",
+    "class_name": "UserRepository",
+    "signature": "def all(self) -> List[User]:",
+    "docstring": "Return every stored user.",
+    "imports": [
+      "from typing import Dict, List, Optional"
+    ],
+    "source_code": "def all(self) -> List[User]:\n        \"\"\"Return every stored user.\"\"\"\n        return list(self._users.values())",
+    "start_line": 42,
+    "end_line": 44
+  },
+  {
+    "chunk_id": "utils.py::is_even::function:6-8",
+    "file_path": "utils.py",
+    "language": "python",
+    "type": "function",
+    "name": "is_even",
+    "class_name": null,
+    "signature": "def is_even(n: int) -> bool:",
+    "docstring": "Return True if n is even.",
+    "imports": [
+      "import re",
+      "from typing import Iterable, List"
+    ],
+    "source_code": "def is_even(n: int) -> bool:\n    \"\"\"Return True if n is even.\"\"\"\n    return n % 2 == 0",
+    "start_line": 6,
+    "end_line": 8
+  },
+  {
+    "chunk_id": "utils.py::chunk_list::function:11-13",
+    "file_path": "utils.py",
+    "language": "python",
+    "type": "function",
+    "name": "chunk_list",
+    "class_name": null,
+    "signature": "def chunk_list(items: List, size: int) -> List[List]:",
+    "docstring": "Split items into consecutive chunks of at most size elements.",
+    "imports": [
+      "import re",
+      "from typing import Iterable, List"
+    ],
+    "source_code": "def chunk_list(items: List, size: int) -> List[List]:\n    \"\"\"Split items into consecutive chunks of at most size elements.\"\"\"\n    return [items[i : i + size] for i in range(0, len(items), size)]",
+    "start_line": 11,
+    "end_line": 13
+  },
+  {
+    "chunk_id": "utils.py::slugify::function:16-19",
+    "file_path": "utils.py",
+    "language": "python",
+    "type": "function",
+    "name": "slugify",
+    "class_name": null,
+    "signature": "def slugify(text: str) -> str:",
+    "docstring": "Convert text into a lowercase, hyphen-separated slug.",
+    "imports": [
+      "import re",
+      "from typing import Iterable, List"
+    ],
+    "source_code": "def slugify(text: str) -> str:\n    \"\"\"Convert text into a lowercase, hyphen-separated slug.\"\"\"\n    text = re.sub(r\"[^\\w\\s-]\", \"\", text).strip().lower()\n    return re.sub(r\"[\\s_]+\", \"-\", text)",
+    "start_line": 16,
+    "end_line": 19
+  },
+  {
+    "chunk_id": "utils.py::flatten::function:22-27",
+    "file_path": "utils.py",
+    "language": "python",
+    "type": "function",
+    "name": "flatten",
+    "class_name": null,
+    "signature": "def flatten(nested: Iterable[Iterable]) -> List:",
+    "docstring": "Flatten one level of nesting.",
+    "imports": [
+      "import re",
+      "from typing import Iterable, List"
+    ],
+    "source_code": "def flatten(nested: Iterable[Iterable]) -> List:\n    \"\"\"Flatten one level of nesting.\"\"\"\n    result = []\n    for group in nested:\n        result.extend(group)\n    return result",
+    "start_line": 22,
+    "end_line": 27
+  }
+]

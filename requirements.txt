@@ -1,0 +1,14 @@
+tree-sitter==0.25.2
+tree-sitter-python==0.25.0
+tree-sitter-java==0.23.5
+tree-sitter-typescript==0.23.2
+tree-sitter-c-sharp==0.23.1
+transformers
+datasets
+scikit-learn
+rank-bm25
+fuzzywuzzy
+python-Levenshtein
+nltk
+sacrebleu
+tiktoken

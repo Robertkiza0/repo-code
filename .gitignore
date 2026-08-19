@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# CrossCodeEval dataset -- large, third-party, not meant for free
+# redistribution (see data/README). Get it via data/crosscodeeval_data.tar.xz
+# + `tar -xvJf` yourself, or `bash scripts/build_treesitter.sh` for the
+# parser manifest.
+data/
