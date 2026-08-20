@@ -66,6 +66,7 @@ class HuggingFaceBackend(SelectionBackend):
         model_name: str = DEFAULT_HF_MODEL,
         device_map: str = "auto",
         max_new_tokens: int = 512,
+        hf_token: Optional[str] = None,
         tokenizer: Optional[object] = None,
         model: Optional[object] = None,
     ):
@@ -78,9 +79,11 @@ class HuggingFaceBackend(SelectionBackend):
                     "HuggingFaceBackend needs 'torch' and 'transformers' installed "
                     "(pip install torch transformers accelerate)."
                 ) from e
-            tokenizer = tokenizer or AutoTokenizer.from_pretrained(model_name)
+            # hf_token=None is fine -- from_pretrained then falls back to
+            # whatever huggingface_hub.login() already set up ambiently.
+            tokenizer = tokenizer or AutoTokenizer.from_pretrained(model_name, token=hf_token)
             model = model or AutoModelForCausalLM.from_pretrained(
-                model_name, device_map=device_map, dtype=torch.bfloat16
+                model_name, device_map=device_map, dtype=torch.bfloat16, token=hf_token
             )
 
         self.tokenizer = tokenizer
