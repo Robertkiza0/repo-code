@@ -92,13 +92,20 @@ class HuggingFaceBackend(SelectionBackend):
 
     def generate(self, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
-        input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        )
-        input_ids = input_ids.to(self.model.device)
+        # return_dict=True makes the return type predictable (a BatchEncoding
+        # with "input_ids"/"attention_mask" keys) -- without it, some
+        # transformers/template versions return a bare tensor and others a
+        # dict-like object, and the latter has no .shape attribute of its own.
+        inputs = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
+        ).to(self.model.device)
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
 
         output_ids = self.model.generate(
-            input_ids,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=self.max_new_tokens,
             do_sample=False,
         )

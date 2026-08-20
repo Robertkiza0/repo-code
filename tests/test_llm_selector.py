@@ -175,7 +175,7 @@ class HuggingFaceBackendTest(unittest.TestCase):
 
     def test_generate_uses_chat_template_and_decodes_output(self):
         tokenizer = MagicMock()
-        tokenizer.apply_chat_template.return_value = MagicMock()
+        tokenizer.apply_chat_template.return_value.to.return_value = MagicMock()
         tokenizer.decode.return_value = '{"selected_chunk_ids": ["a.py::foo::function:1-2"]}'
         model = MagicMock()
         model.generate.return_value = MagicMock()
@@ -185,9 +185,15 @@ class HuggingFaceBackendTest(unittest.TestCase):
 
         self.assertEqual(result, '{"selected_chunk_ids": ["a.py::foo::function:1-2"]}')
         tokenizer.apply_chat_template.assert_called_once()
-        messages = tokenizer.apply_chat_template.call_args[0][0]
-        self.assertEqual(messages, [{"role": "user", "content": "some prompt"}])
+        call = tokenizer.apply_chat_template.call_args
+        self.assertEqual(call[0][0], [{"role": "user", "content": "some prompt"}])
+        # return_dict=True is required -- without it, apply_chat_template can
+        # return a bare tensor with no .shape-safe dict access (this is the
+        # exact bug that crashed on Colab: a BatchEncoding has no .shape).
+        self.assertTrue(call[1].get("return_dict"))
         model.generate.assert_called_once()
+        self.assertIn("input_ids", model.generate.call_args.kwargs)
+        self.assertIn("attention_mask", model.generate.call_args.kwargs)
 
     def test_used_end_to_end_by_llm_selector(self):
         chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
