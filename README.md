@@ -1,8 +1,8 @@
-# repo-code-completion
+# repo-context-completion
 
 A repo-level code completion pipeline: parse a repository with tree-sitter, retrieve
 relevant cross-file context for an incomplete line of code, have an LLM pick which
-retrieved chunks actually matter, then generate the completion with that context.
+retrieved chunks actually matter, then generate the completion with that context. the target is CAN AN LLM SELECT A MINUMUN/USEFUL SUBSET OF REPOSITORY FRAGMENTS FROM A CANDIDATE POOL THAT GIVES TE CODE GENERATOR ENOUGH INFORMATION TO COMPLE THE CODE EFFECTIVELY
 
 ```
 indexer  ->  retrieval  ->  selection  ->  generation
