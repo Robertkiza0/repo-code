@@ -4,6 +4,12 @@
 # "!", or run directly on any Linux box with a GPU.
 set -euo pipefail
 
+# The Ollama installer needs zstd, which minimal images (e.g. Colab) lack.
+if ! command -v zstd >/dev/null 2>&1; then
+    (sudo -n true 2>/dev/null && sudo apt-get update -qq && sudo apt-get install -y -qq zstd) \
+        || (apt-get update -qq && apt-get install -y -qq zstd)
+fi
+
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Start the server in the background -- a Colab cell can't block forever.
