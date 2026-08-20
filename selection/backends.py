@@ -66,6 +66,7 @@ class HuggingFaceBackend(SelectionBackend):
         model_name: str = DEFAULT_HF_MODEL,
         device_map: str = "auto",
         max_new_tokens: int = 512,
+        load_in_4bit: bool = True,
         hf_token: Optional[str] = None,
         tokenizer: Optional[object] = None,
         model: Optional[object] = None,
@@ -82,9 +83,24 @@ class HuggingFaceBackend(SelectionBackend):
             # hf_token=None is fine -- from_pretrained then falls back to
             # whatever huggingface_hub.login() already set up ambiently.
             tokenizer = tokenizer or AutoTokenizer.from_pretrained(model_name, token=hf_token)
-            model = model or AutoModelForCausalLM.from_pretrained(
-                model_name, device_map=device_map, dtype=torch.bfloat16, token=hf_token
-            )
+
+            model_kwargs = {"device_map": device_map, "token": hf_token}
+            if load_in_4bit:
+                # In bf16 this model needs ~15GB -- basically all of a free-tier
+                # T4's VRAM, which forces accelerate to silently offload layers
+                # to CPU/disk (slow) even though a GPU is selected. 4-bit
+                # quantization shrinks it to ~5GB so it fits with room to spare.
+                from transformers import BitsAndBytesConfig
+
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_type="nf4",
+                )
+            else:
+                model_kwargs["dtype"] = torch.bfloat16
+
+            model = model or AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
 
         self.tokenizer = tokenizer
         self.model = model
