@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 import requests
 
@@ -8,6 +8,23 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_TIMEOUT = 120.0
 
 DEFAULT_HF_MODEL = "bigcode/starcoder2-3b"
+
+# CrossCodeEval-style tasks are single-*line* completions, and StarCoder is a
+# raw base completion model with no notion of "stop here" -- left unchecked,
+# it happily keeps going past the target line and starts hallucinating
+# entirely new "# File: ..." blocks, echoing the repo-context prompt shape it
+# was primed with. Stopping at the first newline matches the task and avoids
+# that runaway drift; pass stop_sequences=[] to disable for block-level use.
+DEFAULT_STOP_SEQUENCES = ["\n"]
+
+
+def _truncate_at_stop(text: str, stop_sequences: List[str]) -> str:
+    cut = len(text)
+    for stop in stop_sequences:
+        idx = text.find(stop)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut]
 
 
 class GenerationBackend(ABC):
@@ -34,20 +51,26 @@ class OllamaGenerationBackend(GenerationBackend):
         host: str = DEFAULT_OLLAMA_HOST,
         timeout: float = DEFAULT_OLLAMA_TIMEOUT,
         max_new_tokens: int = 128,
+        stop_sequences: Optional[List[str]] = None,
     ):
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.max_new_tokens = max_new_tokens
+        self.stop_sequences = DEFAULT_STOP_SEQUENCES if stop_sequences is None else stop_sequences
 
     def generate(self, prompt: str) -> str:
+        options = {"temperature": 0, "num_predict": self.max_new_tokens}
+        if self.stop_sequences:
+            options["stop"] = self.stop_sequences  # Ollama stops generation server-side on these
+
         response = requests.post(
             f"{self.host}/api/generate",
             json={
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0, "num_predict": self.max_new_tokens},
+                "options": options,
             },
             timeout=self.timeout,
         )
@@ -71,10 +94,13 @@ class HuggingFaceGenerationBackend(GenerationBackend):
         device_map: str = "auto",
         max_new_tokens: int = 128,
         load_in_4bit: bool = True,
+        stop_sequences: Optional[List[str]] = None,
         hf_token: Optional[str] = None,
         tokenizer: Optional[object] = None,
         model: Optional[object] = None,
     ):
+        self.stop_sequences = DEFAULT_STOP_SEQUENCES if stop_sequences is None else stop_sequences
+
         if tokenizer is None or model is None:
             try:
                 import torch
@@ -120,4 +146,5 @@ class HuggingFaceGenerationBackend(GenerationBackend):
         )
 
         generated = output_ids[0][input_ids.shape[-1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True)
+        text = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return _truncate_at_stop(text, self.stop_sequences) if self.stop_sequences else text

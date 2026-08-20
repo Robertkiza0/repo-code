@@ -149,6 +149,24 @@ class OllamaGenerationBackendTest(unittest.TestCase):
         payload = mock_post.call_args.kwargs["json"]
         self.assertNotIn("format", payload)  # selection forces format="json"; generation must not
 
+    def test_default_stop_sequence_is_sent_to_ollama_server_side(self):
+        backend = OllamaGenerationBackend()
+        with patch("generation.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response("some completion")
+            backend.generate("some prompt")
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["options"]["stop"], ["\n"])
+
+    def test_stop_sequences_can_be_disabled(self):
+        backend = OllamaGenerationBackend(stop_sequences=[])
+        with patch("generation.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response("some completion")
+            backend.generate("some prompt")
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertNotIn("stop", payload["options"])
+
     def test_error_propagates(self):
         backend = OllamaGenerationBackend()
         with patch("generation.backends.requests.post", side_effect=requests.ConnectionError("no server")):
@@ -165,19 +183,45 @@ class HuggingFaceGenerationBackendTest(unittest.TestCase):
 
     def test_generate_uses_plain_tokenizer_call_not_chat_template(self):
         tokenizer = MagicMock()
-        tokenizer.decode.return_value = "def foo():\n    return 1"
+        tokenizer.decode.return_value = "    return 1"  # single line: no default-stop-sequence truncation
         model = MagicMock()
         model.generate.return_value = MagicMock()
 
         backend = HuggingFaceGenerationBackend(tokenizer=tokenizer, model=model)
         result = backend.generate("# File: a.py\ndef foo():")
 
-        self.assertEqual(result, "def foo():\n    return 1")
+        self.assertEqual(result, "    return 1")
         tokenizer.assert_called_once_with("# File: a.py\ndef foo():", return_tensors="pt")
         tokenizer.apply_chat_template.assert_not_called()
         model.generate.assert_called_once()
         self.assertIn("input_ids", model.generate.call_args.kwargs)
         self.assertIn("attention_mask", model.generate.call_args.kwargs)
+
+    def test_default_stop_sequence_truncates_at_first_newline(self):
+        # A base completion model with no stop sequence will happily keep
+        # generating past the target line, e.g. hallucinating fake extra
+        # "# File: ..." blocks that mimic the repo-context prompt shape.
+        tokenizer = MagicMock()
+        tokenizer.decode.return_value = 'default_greeting="Hello")\n\n# File: pkg/module_b.py\nresult = LoudGreeter('
+        model = MagicMock()
+        model.generate.return_value = MagicMock()
+
+        backend = HuggingFaceGenerationBackend(tokenizer=tokenizer, model=model)
+        result = backend.generate("result = Greeter(")
+
+        self.assertEqual(result, 'default_greeting="Hello")')
+        self.assertNotIn("# File:", result)
+
+    def test_stop_sequences_can_be_disabled(self):
+        tokenizer = MagicMock()
+        tokenizer.decode.return_value = "line one\nline two\nline three"
+        model = MagicMock()
+        model.generate.return_value = MagicMock()
+
+        backend = HuggingFaceGenerationBackend(tokenizer=tokenizer, model=model, stop_sequences=[])
+        result = backend.generate("some prompt")
+
+        self.assertEqual(result, "line one\nline two\nline three")
 
 
 if __name__ == "__main__":
