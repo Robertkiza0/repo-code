@@ -11,6 +11,7 @@ from retrieval.dependency_retriever import DependencyRetriever
 from retrieval.symbol_retriever import SymbolRetriever
 from retrieval.candidate_pipeline import CandidatePipeline
 from selection.llm_selector import LLMSelector, parse_selected_ids
+from selection.backends import HuggingFaceBackend, OllamaBackend, SelectionBackend
 
 SAMPLE_REPO = Path(__file__).parent / "sample_repo"
 
@@ -57,7 +58,7 @@ class LLMSelectorTest(unittest.TestCase):
 
     def test_empty_candidates_skips_the_network_call(self):
         selector = LLMSelector(self.chunks)
-        with patch("selection.llm_selector.requests.post") as mock_post:
+        with patch("selection.backends.requests.post") as mock_post:
             result = selector.select("result = Greeter(", "pkg/module_b.py", [])
         mock_post.assert_not_called()
         self.assertEqual(result["selected_chunk_ids"], [])
@@ -66,7 +67,7 @@ class LLMSelectorTest(unittest.TestCase):
     def test_valid_selection_is_returned(self):
         chosen = [self.candidate_ids[0], self.candidate_ids[1]]
         selector = LLMSelector(self.chunks)
-        with patch("selection.llm_selector.requests.post") as mock_post:
+        with patch("selection.backends.requests.post") as mock_post:
             mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         self.assertEqual(result["selected_chunk_ids"], chosen)
@@ -76,7 +77,7 @@ class LLMSelectorTest(unittest.TestCase):
     def test_hallucinated_ids_are_dropped(self):
         chosen = [self.candidate_ids[0], "totally_made_up_chunk_id"]
         selector = LLMSelector(self.chunks)
-        with patch("selection.llm_selector.requests.post") as mock_post:
+        with patch("selection.backends.requests.post") as mock_post:
             mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
@@ -85,7 +86,7 @@ class LLMSelectorTest(unittest.TestCase):
     def test_duplicate_ids_from_model_are_deduped(self):
         chosen = [self.candidate_ids[0], self.candidate_ids[0]]
         selector = LLMSelector(self.chunks)
-        with patch("selection.llm_selector.requests.post") as mock_post:
+        with patch("selection.backends.requests.post") as mock_post:
             mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
@@ -98,7 +99,7 @@ class LLMSelectorTest(unittest.TestCase):
             captured_payload.update(json)
             return _mock_ollama_response('{"selected_chunk_ids": []}')
 
-        with patch("selection.llm_selector.requests.post", side_effect=fake_post):
+        with patch("selection.backends.requests.post", side_effect=fake_post):
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
 
         self.assertIn("not writing the completion", captured_payload["prompt"].lower())
@@ -107,7 +108,7 @@ class LLMSelectorTest(unittest.TestCase):
     def test_logs_candidate_and_selected_ids(self):
         selector = LLMSelector(self.chunks)
         chosen = [self.candidate_ids[0]]
-        with patch("selection.llm_selector.requests.post") as mock_post:
+        with patch("selection.backends.requests.post") as mock_post:
             mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
             with self.assertLogs("selection.llm_selector", level="INFO") as log_ctx:
                 selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
@@ -118,9 +119,93 @@ class LLMSelectorTest(unittest.TestCase):
 
     def test_ollama_error_propagates(self):
         selector = LLMSelector(self.chunks)
-        with patch("selection.llm_selector.requests.post", side_effect=requests.ConnectionError("no server")):
+        with patch("selection.backends.requests.post", side_effect=requests.ConnectionError("no server")):
             with self.assertRaises(requests.ConnectionError):
                 selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
+
+
+class FakeBackend(SelectionBackend):
+    """A trivial in-memory backend for testing LLMSelector <-> backend plumbing."""
+
+    def __init__(self, response_text: str):
+        self.response_text = response_text
+        self.prompts_received: List[str] = []
+
+    def generate(self, prompt: str) -> str:
+        self.prompts_received.append(prompt)
+        return self.response_text
+
+
+class LLMSelectorCustomBackendTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+        pipeline = CandidatePipeline(
+            BM25Retriever(cls.chunks), SymbolRetriever(cls.chunks), DependencyRetriever(cls.chunks)
+        )
+        cls.candidates = pipeline.nominate("result = Greeter(", target_file="pkg/module_b.py")
+        cls.candidate_ids = [c["chunk_id"] for c in cls.candidates]
+
+    def test_default_backend_is_ollama(self):
+        selector = LLMSelector(self.chunks)
+        self.assertIsInstance(selector.backend, OllamaBackend)
+
+    def test_injected_backend_is_used_instead_of_ollama(self):
+        chosen = [self.candidate_ids[0]]
+        fake = FakeBackend(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+        selector = LLMSelector(self.chunks, backend=fake)
+
+        with patch("selection.backends.requests.post") as mock_post:
+            result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
+
+        mock_post.assert_not_called()  # never touches Ollama at all
+        self.assertEqual(len(fake.prompts_received), 1)
+        self.assertEqual(result["selected_chunk_ids"], chosen)
+
+
+class HuggingFaceBackendTest(unittest.TestCase):
+    def test_raises_clear_error_without_torch_transformers_installed(self):
+        # This dev environment intentionally doesn't have torch installed
+        # (kept the Windows box light) -- so this is a real assertion, not a
+        # simulated one: loading by name without injected objects must fail
+        # fast with a clear message rather than a confusing stack trace.
+        with self.assertRaises(ImportError) as ctx:
+            HuggingFaceBackend()
+        self.assertIn("torch", str(ctx.exception))
+
+    def test_generate_uses_chat_template_and_decodes_output(self):
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = MagicMock()
+        tokenizer.decode.return_value = '{"selected_chunk_ids": ["a.py::foo::function:1-2"]}'
+        model = MagicMock()
+        model.generate.return_value = MagicMock()
+
+        backend = HuggingFaceBackend(tokenizer=tokenizer, model=model)
+        result = backend.generate("some prompt")
+
+        self.assertEqual(result, '{"selected_chunk_ids": ["a.py::foo::function:1-2"]}')
+        tokenizer.apply_chat_template.assert_called_once()
+        messages = tokenizer.apply_chat_template.call_args[0][0]
+        self.assertEqual(messages, [{"role": "user", "content": "some prompt"}])
+        model.generate.assert_called_once()
+
+    def test_used_end_to_end_by_llm_selector(self):
+        chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+        pipeline = CandidatePipeline(BM25Retriever(chunks), SymbolRetriever(chunks), DependencyRetriever(chunks))
+        candidates = pipeline.nominate("result = Greeter(", target_file="pkg/module_b.py")
+        chosen_id = candidates[0]["chunk_id"]
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = MagicMock()
+        tokenizer.decode.return_value = f'{{"selected_chunk_ids": ["{chosen_id}"]}}'
+        model = MagicMock()
+        model.generate.return_value = MagicMock()
+
+        backend = HuggingFaceBackend(tokenizer=tokenizer, model=model)
+        selector = LLMSelector(chunks, backend=backend)
+        result = selector.select("result = Greeter(", "pkg/module_b.py", candidates)
+
+        self.assertEqual(result["selected_chunk_ids"], [chosen_id])
 
 
 def _is_ollama_reachable() -> bool:

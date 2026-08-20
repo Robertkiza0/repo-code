@@ -2,15 +2,22 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
-import requests
+from selection.backends import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_TIMEOUT,
+    OllamaBackend,
+    SelectionBackend,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "qwen2.5-coder:7b"
-DEFAULT_HOST = "http://localhost:11434"
-DEFAULT_TIMEOUT = 60.0
+# Kept as aliases for backward compatibility -- these used to live here directly.
+DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL
+DEFAULT_HOST = DEFAULT_OLLAMA_HOST
+DEFAULT_TIMEOUT = DEFAULT_OLLAMA_TIMEOUT
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _DOCSTRING_PREVIEW_LEN = 200
@@ -44,13 +51,19 @@ def parse_selected_ids(raw_response: str) -> List[str]:
 
 
 class LLMSelector:
-    """Asks a local Ollama model which candidate chunks are useful context for
-    completing the code at the cursor -- it only ever picks ids, it is never
-    asked to write the completion itself.
+    """Asks a model which candidate chunks are useful context for completing
+    the code at the cursor -- it only ever picks ids, it is never asked to
+    write the completion itself.
 
     Any chunk_id the model returns that isn't actually in the candidate pool
     (a hallucination) is dropped rather than trusted; both the full candidate
     pool and the validated selection are logged for every call.
+
+    Model access is pluggable via `backend` (a SelectionBackend): defaults to
+    OllamaBackend for backward compatibility, but e.g. `HuggingFaceBackend()`
+    from selection.backends can be passed instead to run a transformers model
+    in-process (useful where running a separate Ollama server is impractical,
+    like Colab).
     """
 
     def __init__(
@@ -59,10 +72,9 @@ class LLMSelector:
         model: str = DEFAULT_MODEL,
         host: str = DEFAULT_HOST,
         timeout: float = DEFAULT_TIMEOUT,
+        backend: Optional[SelectionBackend] = None,
     ):
-        self.model = model
-        self.host = host.rstrip("/")
-        self.timeout = timeout
+        self.backend = backend or OllamaBackend(model=model, host=host, timeout=timeout)
         self._chunk_lookup = {c["chunk_id"]: c for c in chunks}
 
     @classmethod
@@ -81,7 +93,7 @@ class LLMSelector:
             return {"selected_chunk_ids": [], "candidate_chunk_ids": [], "rejected_hallucinated_ids": [], "raw_response": ""}
 
         prompt = self._build_prompt(code_before_cursor, target_file, candidates)
-        raw_response = self._call_ollama(prompt)
+        raw_response = self.backend.generate(prompt)
         proposed_ids = parse_selected_ids(raw_response)
 
         candidate_id_set = set(candidate_ids)
@@ -139,18 +151,3 @@ class LLMSelector:
             "not invent new ones. If none are useful, return an empty list. Do not write "
             "any code. Do not explain your answer. Respond with JSON only."
         )
-
-    def _call_ollama(self, prompt: str) -> str:
-        response = requests.post(
-            f"{self.host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0},
-            },
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return response.json().get("response", "")
