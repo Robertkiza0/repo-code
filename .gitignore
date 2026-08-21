@@ -11,8 +11,13 @@ dist/
 # + `tar -xvJf` yourself, or `bash scripts/build_treesitter.sh` for the
 # parser manifest.
 #
-# Exception: data/cceval/ holds small, derived samples (e.g. a 20-example
-# jsonl slice for scripts/inspect_cceval.py) that are fine to commit --
-# unlike the ~900MB full dataset above, these stay under a few KB.
+# Exception: data/cceval/samples/ holds small, derived samples (e.g. a
+# 20-example jsonl slice for scripts/inspect_cceval.py) that are fine to
+# commit -- unlike the ~900MB full dataset above, these stay under a few KB.
+# data/cceval/repos/ and data/cceval/repo_indexes/ (real cloned GitHub repos
+# + their built indexes, from evaluation/cceval_adapter.py) stay ignored --
+# those are regenerable and can be large.
 data/*
 !data/cceval/
+data/cceval/*
+!data/cceval/samples/
