@@ -119,13 +119,82 @@ class RunOneExampleTest(unittest.TestCase):
         self.assertEqual(result["task_id"], example["task_id"])
         self.assertEqual(result["repository"], example["repository"])
         self.assertEqual(result["target_file"], example["file"])
+        self.assertEqual(result["prompt"], example["prompt"])
+        self.assertEqual(result["groundtruth"], example["groundtruth"])
         self.assertIsInstance(result["num_candidates"], int)
         self.assertGreater(result["num_candidates"], 0)
+        self.assertEqual(len(result["candidates"]), result["num_candidates"])
         self.assertIsInstance(result["selected_chunk_ids"], list)
         self.assertEqual(result["completion"], "some completion")
         self.assertEqual(set(result.keys()), {
-            "task_id", "repository", "target_file", "num_candidates", "selected_chunk_ids", "completion"
+            "task_id", "repository", "target_file", "prompt", "groundtruth",
+            "num_candidates", "candidates", "selected_chunk_ids", "completion",
         })
+
+
+class PrintResultTest(unittest.TestCase):
+    def setUp(self):
+        self.chunks = [
+            {
+                "chunk_id": "a.py::foo::function:1-2",
+                "file_path": "a.py",
+                "name": "foo",
+                "source_code": "def foo():\n    return 1",
+            },
+            {
+                "chunk_id": "b.py::bar::function:1-3",
+                "file_path": "b.py",
+                "name": "bar",
+                "source_code": "def bar():\n    x = 1\n    return x",
+            },
+        ]
+        self.result = {
+            "task_id": "project_cc_python/1",
+            "repository": "owner-repo-abc1234",
+            "target_file": "c.py",
+            "prompt": "line1\nline2\nresult = foo(",
+            "groundtruth": ")",
+            "num_candidates": 2,
+            "candidates": [
+                {"chunk_id": "a.py::foo::function:1-2", "file_path": "a.py", "name": "foo", "sources": ["bm25"], "scores": {}},
+                {"chunk_id": "b.py::bar::function:1-3", "file_path": "b.py", "name": "bar", "sources": ["dependency"], "scores": {}},
+            ],
+            "selected_chunk_ids": ["a.py::foo::function:1-2"],
+            "completion": ")",
+        }
+
+    def test_includes_all_requested_sections(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_result
+
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_result(self.chunks, self.result)
+        output = buf.getvalue()
+
+        self.assertIn("project_cc_python/1", output)
+        self.assertIn("owner-repo-abc1234", output)
+        self.assertIn("c.py", output)
+        self.assertIn("result = foo(", output)  # incomplete code (prompt tail)
+        self.assertIn("a.py::foo::function:1-2", output)  # candidate chunk_id
+        self.assertIn("b.py::bar::function:1-3", output)  # candidate chunk_id
+        self.assertIn("def foo():", output)  # candidate preview source
+        self.assertIn("def bar():", output)  # candidate preview source
+        self.assertIn(")", output)  # completion / groundtruth (both are ")")
+
+    def test_selected_chunk_gets_full_source_not_just_preview(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_result
+
+        long_source = "def foo():\n" + "\n".join(f"    line{i}" for i in range(10))
+        self.chunks[0]["source_code"] = long_source
+
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_result(self.chunks, self.result, preview_lines=2)
+        output = buf.getvalue()
+
+        self.assertIn("line9", output)  # full source for the *selected* chunk reaches the end
 
 
 if __name__ == "__main__":

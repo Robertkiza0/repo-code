@@ -105,20 +105,63 @@ def run_one_example(
         "task_id": example["task_id"],
         "repository": example["repository"],
         "target_file": example["file"],
+        "prompt": example["prompt"],
+        "groundtruth": example["groundtruth"],
         "num_candidates": len(candidates),
+        "candidates": candidates,
         "selected_chunk_ids": selection["selected_chunk_ids"],
         "completion": generated["completion"],
     }
 
 
-def print_result(result: Dict) -> None:
-    print("task_id:           ", result["task_id"])
-    print("repository:        ", result["repository"])
-    print("target_file:       ", result["target_file"])
-    print("num_candidates:    ", result["num_candidates"])
-    print("selected_chunk_ids:", result["selected_chunk_ids"])
-    print("completion:")
+def _preview(source_code: str, num_lines: int) -> str:
+    lines = source_code.splitlines()
+    preview = "\n".join(f"    {line}" for line in lines[:num_lines])
+    if len(lines) > num_lines:
+        preview += "\n    ..."
+    return preview
+
+
+def print_result(chunks: List[Dict], result: Dict, preview_lines: int = 3, prompt_tail_lines: int = 8) -> None:
+    """Prints task_id/repository/target_file, the tail of the incomplete
+    prompt, all candidates (chunk_id + a short source preview), Qwen's
+    selected chunk_ids with their full source, the StarCoder completion, and
+    -- for comparison only, never fed into the pipeline -- the groundtruth.
+    """
+    chunk_lookup = {c["chunk_id"]: c for c in chunks}
+
+    print("task_id:    ", result["task_id"])
+    print("repository: ", result["repository"])
+    print("target_file:", result["target_file"])
+    print()
+
+    prompt_lines = result["prompt"].splitlines()
+    tail = prompt_lines[-prompt_tail_lines:]
+    print(f"Incomplete code (last {len(tail)} line(s) of the prompt):")
+    print("\n".join(tail))
+    print()
+
+    print(f"Candidates ({result['num_candidates']}):")
+    for candidate in result["candidates"]:
+        chunk = chunk_lookup.get(candidate["chunk_id"], {})
+        print(f"  [{candidate['chunk_id']}]  sources={candidate['sources']}")
+        print(_preview(chunk.get("source_code", ""), preview_lines))
+    print()
+
+    print(f"Qwen selected chunk_ids ({len(result['selected_chunk_ids'])}):")
+    for chunk_id in result["selected_chunk_ids"]:
+        chunk = chunk_lookup.get(chunk_id, {})
+        print(f"  [{chunk_id}]")
+        for line in chunk.get("source_code", "").splitlines():
+            print(f"    {line}")
+    print()
+
+    print("StarCoder completion:")
     print(result["completion"])
+    print()
+
+    print("Ground truth (for comparison only -- never passed to retrieval/selection/generation):")
+    print(result["groundtruth"])
 
 
 def main() -> None:
@@ -131,8 +174,10 @@ def main() -> None:
     parser.add_argument("-n", "--index", type=int, default=0)
     args = parser.parse_args()
 
+    example = load_cceval_example(args.jsonl, args.index)
+    chunks = locate_repo_index(example["repository"])  # cached after first call
     result = run_one_example(args.jsonl, args.index)
-    print_result(result)
+    print_result(chunks, result)
 
 
 if __name__ == "__main__":
