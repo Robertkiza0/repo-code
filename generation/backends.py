@@ -91,7 +91,7 @@ class HuggingFaceGenerationBackend(GenerationBackend):
     def __init__(
         self,
         model_name: str = DEFAULT_HF_MODEL,
-        device_map: str = "auto",
+        device_map: Optional[object] = None,
         max_new_tokens: int = 128,
         load_in_4bit: bool = True,
         stop_sequences: Optional[List[str]] = None,
@@ -112,6 +112,12 @@ class HuggingFaceGenerationBackend(GenerationBackend):
                 ) from e
             tokenizer = tokenizer or AutoTokenizer.from_pretrained(model_name, token=hf_token)
 
+            if device_map is None:
+                # See selection.backends.HuggingFaceBackend -- "auto" can make
+                # unpredictable partial-CPU-offload decisions once a second
+                # model is already resident in VRAM. Pin explicitly to GPU 0
+                # when one exists; only fall back to "auto" on CPU-only machines.
+                device_map = {"": 0} if torch.cuda.is_available() else "auto"
             model_kwargs = {"device_map": device_map, "token": hf_token}
             if load_in_4bit:
                 # Same reasoning as selection.backends.HuggingFaceBackend: fits

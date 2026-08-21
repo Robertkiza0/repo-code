@@ -64,7 +64,7 @@ class HuggingFaceBackend(SelectionBackend):
     def __init__(
         self,
         model_name: str = DEFAULT_HF_MODEL,
-        device_map: str = "auto",
+        device_map: Optional[object] = None,
         max_new_tokens: int = 512,
         load_in_4bit: bool = True,
         hf_token: Optional[str] = None,
@@ -84,6 +84,13 @@ class HuggingFaceBackend(SelectionBackend):
             # whatever huggingface_hub.login() already set up ambiently.
             tokenizer = tokenizer or AutoTokenizer.from_pretrained(model_name, token=hf_token)
 
+            if device_map is None:
+                # "auto" can make unpredictable partial-CPU-offload decisions
+                # once a second model is already resident in VRAM (observed:
+                # generation silently and massively slower after this backend
+                # loaded alongside another). Pin explicitly to GPU 0 when one
+                # exists; only fall back to "auto" on CPU-only machines.
+                device_map = {"": 0} if torch.cuda.is_available() else "auto"
             model_kwargs = {"device_map": device_map, "token": hf_token}
             if load_in_4bit:
                 # In bf16 this model needs ~15GB -- basically all of a free-tier
