@@ -10,4 +10,9 @@ dist/
 # redistribution (see data/README). Get it via data/crosscodeeval_data.tar.xz
 # + `tar -xvJf` yourself, or `bash scripts/build_treesitter.sh` for the
 # parser manifest.
-data/
+#
+# Exception: data/cceval/ holds small, derived samples (e.g. a 20-example
+# jsonl slice for scripts/inspect_cceval.py) that are fine to commit --
+# unlike the ~900MB full dataset above, these stay under a few KB.
+data/*
+!data/cceval/
