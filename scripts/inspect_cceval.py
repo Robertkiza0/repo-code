@@ -8,7 +8,12 @@ import argparse
 import json
 from pathlib import Path
 
-DEFAULT_PATH = "data/cceval/samples/line_completion_20.jsonl"
+# Resolved relative to this script's own location (the repo root, one level
+# up from scripts/), not the current working directory -- so the default
+# works whether run as `python scripts/inspect_cceval.py` from the repo root,
+# via VS Code's "Run Python File" (which uses the file's own folder as cwd),
+# or from anywhere else.
+DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data/cceval/samples/line_completion_20.jsonl"
 
 
 def describe(value) -> str:
