@@ -9,6 +9,16 @@ from evaluation.cceval_adapter import (
     run_one_example,
     verify_and_run_task,
 )
+from evaluation.experiment import (
+    preflight_check,
+    print_summary_table,
+    print_task_table,
+    run_experiment,
+    save_results_jsonl,
+    save_summary_json,
+    summarize,
+)
+from evaluation.metrics import edit_similarity, exact_match, identifier_f1
 
 __all__ = [
     "load_cceval_example",
@@ -20,4 +30,14 @@ __all__ = [
     "print_side_by_side",
     "assign_candidate_labels",
     "print_experiment_log",
+    "exact_match",
+    "edit_similarity",
+    "identifier_f1",
+    "run_experiment",
+    "preflight_check",
+    "summarize",
+    "save_results_jsonl",
+    "save_summary_json",
+    "print_summary_table",
+    "print_task_table",
 ]

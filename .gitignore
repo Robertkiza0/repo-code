@@ -21,3 +21,6 @@ data/*
 !data/cceval/
 data/cceval/*
 !data/cceval/samples/
+
+# Experiment output (evaluation/experiment.py) -- regenerable, not committed.
+results/
