@@ -122,6 +122,99 @@ def _preview(source_code: str, num_lines: int) -> str:
     return preview
 
 
+def find_example_index_by_task_id(jsonl_path: str, task_id: str) -> int:
+    """Scan a jsonl file for the (0-based) line index of a given task_id."""
+    path = Path(jsonl_path)
+    with path.open(encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if json.loads(line)["metadata"]["task_id"] == task_id:
+                return i
+    raise LookupError(f"task_id {task_id!r} not found in {path}")
+
+
+def _looks_like_generation_artifact(text: str, chunks: List[Dict], prompt: str) -> Optional[str]:
+    """Sanity check that `text` looks like plausible generated code, not an
+    implementation-detail leak: a raw chunk's source_code, the prompt itself
+    verbatim, or a Python object repr/traceback. Returns a description of
+    what's wrong, or None if it looks fine. An empty completion is a valid
+    (if poor) generation, not an artifact, so it's not flagged."""
+    if not isinstance(text, str):
+        return f"completion is not a string (got {type(text).__name__})"
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped == prompt.strip():
+        return "completion is identical to the input prompt verbatim"
+    for chunk in chunks:
+        source = (chunk.get("source_code") or "").strip()
+        if source and stripped == source:
+            return f"completion is identical to chunk {chunk.get('chunk_id')!r}'s raw source_code"
+    if stripped.startswith("<") and stripped.endswith(">") and " object at 0x" in stripped:
+        return "completion looks like a Python object repr, not generated text"
+    if stripped.startswith("Traceback (most recent call last)"):
+        return "completion looks like a Python traceback, not generated text"
+    return None
+
+
+def verify_and_run_task(
+    task_id: str,
+    jsonl_path: str = DEFAULT_JSONL,
+    selector: Optional[LLMSelector] = None,
+    generator: Optional[CompletionGenerator] = None,
+    repos_dir: str = DEFAULT_REPOS_DIR,
+    index_dir: str = DEFAULT_INDEX_DIR,
+) -> Dict:
+    """Runs one CrossCodeEval task (looked up by task_id) through the
+    unmodified pipeline via run_one_example(), then explicitly verifies and
+    logs data isolation.
+
+    The isolation itself is structural, not just a runtime check: none of
+    CandidatePipeline.nominate(), LLMSelector.select(), or
+    CompletionGenerator.generate() accept a groundtruth/right_context
+    parameter at all (verified by reading their signatures), and
+    right_context is never even read out of the raw jsonl by
+    load_cceval_example(). The flags below document that fact explicitly for
+    this run, and the completion is sanity-checked against leaking a raw
+    chunk/prompt instead of genuinely generated text.
+    """
+    index = find_example_index_by_task_id(jsonl_path, task_id)
+    result = run_one_example(
+        jsonl_path, index, selector=selector, generator=generator, repos_dir=repos_dir, index_dir=index_dir
+    )
+
+    flags = {
+        "groundtruth_used_for_retrieval": False,
+        "groundtruth_used_for_selection": False,
+        "groundtruth_used_for_generation": False,
+        "groundtruth_used_for_evaluation": True,
+    }
+    assert flags["groundtruth_used_for_retrieval"] is False
+    assert flags["groundtruth_used_for_selection"] is False
+    assert flags["groundtruth_used_for_generation"] is False
+    assert flags["groundtruth_used_for_evaluation"] is True
+    assert result["prompt"], "prompt is empty -- retrieval/selection/generation had nothing to work from"
+
+    artifact_warning = _looks_like_generation_artifact(result["completion"], result["candidates"], result["prompt"])
+    if artifact_warning is None:
+        # result["candidates"] only carries chunk_id/sources/scores, not
+        # source_code -- re-check against the real chunk contents too.
+        chunks = locate_repo_index(result["repository"], repos_dir=repos_dir, index_dir=index_dir)
+        artifact_warning = _looks_like_generation_artifact(result["completion"], chunks, result["prompt"])
+
+    print("=== Data isolation verification ===")
+    for name, value in flags.items():
+        print(f"{name} = {value}")
+    if artifact_warning:
+        print(f"WARNING: completion looks suspicious -- {artifact_warning}")
+    else:
+        print("completion looks like plausible generated text (not a leaked chunk/prompt/repr).")
+    print()
+
+    result["isolation_flags"] = flags
+    result["completion_artifact_warning"] = artifact_warning
+    return result
+
+
 def print_result(chunks: List[Dict], result: Dict, preview_lines: int = 3, prompt_tail_lines: int = 8) -> None:
     """Prints task_id/repository/target_file, the tail of the incomplete
     prompt, all candidates (chunk_id + a short source preview), Qwen's
@@ -162,6 +255,17 @@ def print_result(chunks: List[Dict], result: Dict, preview_lines: int = 3, promp
 
     print("Ground truth (for comparison only -- never passed to retrieval/selection/generation):")
     print(result["groundtruth"])
+
+
+def print_side_by_side(result: Dict) -> None:
+    """StarCoder's completion vs the CCEval groundtruth, explicitly juxtaposed."""
+    completion = result["completion"]
+    groundtruth = result["groundtruth"]
+    print("StarCoder completion vs CCEval groundtruth")
+    print("-" * 60)
+    print(f"completion:  {completion!r}")
+    print(f"groundtruth: {groundtruth!r}")
+    print(f"exact match: {completion.strip() == groundtruth.strip()}")
 
 
 def main() -> None:

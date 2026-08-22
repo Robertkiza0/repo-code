@@ -5,8 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from evaluation.cceval_adapter import load_cceval_example, locate_repo_index, run_one_example
+from evaluation.cceval_adapter import load_cceval_example, locate_repo_index, run_one_example, verify_and_run_task
 from generation.generator import CompletionGenerator
+from indexer.repo_parser import RepoParser
+from retrieval.bm25_retriever import BM25Retriever
+from retrieval.symbol_retriever import SymbolRetriever
+from retrieval.dependency_retriever import DependencyRetriever
+from retrieval.candidate_pipeline import CandidatePipeline
 from selection.backends import SelectionBackend
 from selection.llm_selector import LLMSelector
 
@@ -195,6 +200,188 @@ class PrintResultTest(unittest.TestCase):
         output = buf.getvalue()
 
         self.assertIn("line9", output)  # full source for the *selected* chunk reaches the end
+
+
+class FindExampleIndexByTaskIdTest(unittest.TestCase):
+    def test_finds_the_real_task_at_index_zero(self):
+        from evaluation.cceval_adapter import find_example_index_by_task_id
+
+        index = find_example_index_by_task_id(str(SAMPLE_JSONL), "project_cc_python/62")
+        self.assertEqual(index, 0)
+
+    def test_unknown_task_id_raises(self):
+        from evaluation.cceval_adapter import find_example_index_by_task_id
+
+        with self.assertRaises(LookupError):
+            find_example_index_by_task_id(str(SAMPLE_JSONL), "not-a-real-task-id")
+
+
+class LooksLikeGenerationArtifactTest(unittest.TestCase):
+    def test_plain_generated_text_is_not_flagged(self):
+        from evaluation.cceval_adapter import _looks_like_generation_artifact
+
+        warning = _looks_like_generation_artifact("return self.value + 1", [], "def foo():")
+        self.assertIsNone(warning)
+
+    def test_empty_completion_is_not_flagged(self):
+        from evaluation.cceval_adapter import _looks_like_generation_artifact
+
+        self.assertIsNone(_looks_like_generation_artifact("", [], "def foo():"))
+
+    def test_completion_identical_to_prompt_is_flagged(self):
+        from evaluation.cceval_adapter import _looks_like_generation_artifact
+
+        warning = _looks_like_generation_artifact("def foo():", [], "def foo():")
+        self.assertIsNotNone(warning)
+        self.assertIn("prompt", warning)
+
+    def test_completion_identical_to_a_chunk_source_is_flagged(self):
+        from evaluation.cceval_adapter import _looks_like_generation_artifact
+
+        chunks = [{"chunk_id": "a.py::foo::function:1-2", "source_code": "def foo():\n    return 1"}]
+        warning = _looks_like_generation_artifact("def foo():\n    return 1", chunks, "something else")
+        self.assertIsNotNone(warning)
+        self.assertIn("a.py::foo::function:1-2", warning)
+
+    def test_object_repr_is_flagged(self):
+        from evaluation.cceval_adapter import _looks_like_generation_artifact
+
+        warning = _looks_like_generation_artifact("<Tensor object at 0x7f1234>", [], "prompt")
+        self.assertIsNotNone(warning)
+
+
+class VerifyAndRunTaskTest(unittest.TestCase):
+    def test_isolation_flags_and_completion_check_on_a_clean_run(self):
+        chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+        pipeline = CandidatePipeline(BM25Retriever(chunks), SymbolRetriever(chunks), DependencyRetriever(chunks))
+        candidates = pipeline.nominate("result = Greeter(", target_file="pkg/module_b.py")
+        chosen_id = candidates[0]["chunk_id"]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Build a jsonl with a real-shaped task pointing at our test fixture repo.
+            jsonl_path = Path(tmp_dir) / "one_task.jsonl"
+            jsonl_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": "result = Greeter(",
+                        "groundtruth": "default_greeting='Hi').greet('world')",
+                        "right_context": "\nprint(result)\n",
+                        "metadata": {
+                            "task_id": "project_cc_python/62",
+                            "repository": "someowner-somerepo-abc1234",
+                            "file": "pkg/module_b.py",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            selection_backend = FakeSelectionBackend(n=1)
+            selector = LLMSelector(chunks, backend=selection_backend)
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "a plausible generated line"
+            generator = CompletionGenerator(chunks, backend=generation_backend)
+
+            with patch(
+                "evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")
+            ), patch("evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout):
+                result = verify_and_run_task(
+                    "project_cc_python/62",
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    generator=generator,
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+        self.assertEqual(
+            result["isolation_flags"],
+            {
+                "groundtruth_used_for_retrieval": False,
+                "groundtruth_used_for_selection": False,
+                "groundtruth_used_for_generation": False,
+                "groundtruth_used_for_evaluation": True,
+            },
+        )
+        self.assertIsNone(result["completion_artifact_warning"])
+        self.assertEqual(result["completion"], "a plausible generated line")
+        self.assertEqual(result["groundtruth"], "default_greeting='Hi').greet('world')")
+
+        # groundtruth/right_context text must never have reached the generation prompt.
+        sent_prompt = generation_backend.generate.call_args[0][0]
+        self.assertNotIn("default_greeting='Hi').greet('world')", sent_prompt)
+        self.assertNotIn("print(result)", sent_prompt)
+
+    def test_flags_a_completion_that_leaked_raw_chunk_source(self):
+        chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "one_task.jsonl"
+            jsonl_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": "result = Greeter(",
+                        "groundtruth": "whatever",
+                        "right_context": "",
+                        "metadata": {
+                            "task_id": "project_cc_python/62",
+                            "repository": "someowner-somerepo-abc1234",
+                            "file": "pkg/module_b.py",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            selector = LLMSelector(chunks, backend=FakeSelectionBackend(n=1))
+
+            leaked_source = next(c["source_code"] for c in chunks if c["name"] == "Greeter")
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = leaked_source
+            generator = CompletionGenerator(chunks, backend=generation_backend)
+
+            with patch(
+                "evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")
+            ), patch("evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout):
+                result = verify_and_run_task(
+                    "project_cc_python/62",
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    generator=generator,
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+        self.assertIsNotNone(result["completion_artifact_warning"])
+        self.assertIn("source_code", result["completion_artifact_warning"])
+
+
+class PrintSideBySideTest(unittest.TestCase):
+    def test_shows_completion_and_groundtruth_with_match_flag(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_side_by_side
+
+        result = {"completion": "x + 1", "groundtruth": "x + 1"}
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_side_by_side(result)
+        output = buf.getvalue()
+
+        self.assertIn("x + 1", output)
+        self.assertIn("exact match: True", output)
+
+    def test_mismatch_reported(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_side_by_side
+
+        result = {"completion": "x + 1", "groundtruth": "x + 2"}
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_side_by_side(result)
+        self.assertIn("exact match: False", buf.getvalue())
 
 
 if __name__ == "__main__":
