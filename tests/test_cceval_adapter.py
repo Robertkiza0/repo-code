@@ -133,7 +133,8 @@ class RunOneExampleTest(unittest.TestCase):
         self.assertEqual(result["completion"], "some completion")
         self.assertEqual(set(result.keys()), {
             "task_id", "repository", "target_file", "prompt", "groundtruth",
-            "num_candidates", "candidates", "selected_chunk_ids", "completion",
+            "num_candidates", "candidates", "selected_chunk_ids", "rejected_hallucinated_ids",
+            "raw_response", "completion",
         })
 
 
@@ -308,6 +309,12 @@ class VerifyAndRunTaskTest(unittest.TestCase):
         self.assertIsNone(result["completion_artifact_warning"])
         self.assertEqual(result["completion"], "a plausible generated line")
         self.assertEqual(result["groundtruth"], "default_greeting='Hi').greet('world')")
+
+        # the model's actual raw text response is captured, not just the
+        # parsed ids -- needed to tell an intentional empty selection apart
+        # from a parsing failure.
+        self.assertIn("selected_chunk_ids", result["raw_response"])
+        self.assertEqual(result["rejected_hallucinated_ids"], [])
 
         # groundtruth/right_context text must never have reached the generation prompt.
         sent_prompt = generation_backend.generate.call_args[0][0]

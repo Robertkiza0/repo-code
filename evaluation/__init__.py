@@ -10,8 +10,12 @@ from evaluation.cceval_adapter import (
     verify_and_run_task,
 )
 from evaluation.experiment import (
+    check_selection_validity,
+    inspect_task_selection,
     preflight_check,
+    print_selection_validity_table,
     print_summary_table,
+    print_task_selection_diagnosis,
     print_task_table,
     run_experiment,
     save_results_jsonl,
@@ -40,4 +44,8 @@ __all__ = [
     "save_summary_json",
     "print_summary_table",
     "print_task_table",
+    "check_selection_validity",
+    "print_selection_validity_table",
+    "inspect_task_selection",
+    "print_task_selection_diagnosis",
 ]

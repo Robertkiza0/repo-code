@@ -14,11 +14,17 @@ from evaluation.cceval_adapter import (
     DEFAULT_JSONL,
     DEFAULT_REPOS_DIR,
     assign_candidate_labels,
+    find_example_index_by_task_id,
     load_cceval_example,
+    locate_repo_index,
     run_one_example,
 )
 from evaluation.metrics import edit_similarity, exact_match, identifier_f1
 from generation.generator import CompletionGenerator
+from retrieval.bm25_retriever import BM25Retriever
+from retrieval.candidate_pipeline import CandidatePipeline
+from retrieval.dependency_retriever import DependencyRetriever
+from retrieval.symbol_retriever import SymbolRetriever
 from selection.llm_selector import LLMSelector
 
 DEFAULT_RESULTS_DIR = "results"
@@ -202,3 +208,136 @@ def print_task_table(task_results: List[Dict]) -> None:
             f"{r['task_id']:<24} | {r['candidate_count']:>10} | {r['selected_count']:>8} | "
             f"{em:>5} | {r['ES']:.3f} | {r['ID-F1']:.3f} | {r['generation_time']:.2f}s"
         )
+
+
+def check_selection_validity(results: List[Dict]) -> List[Dict]:
+    """For each task's saved record, verifies every selected_candidate_id is
+    actually present among that task's own candidate_ids -- i.e. nothing
+    outside the offered pool slipped through. This should structurally
+    always hold: LLMSelector already drops any id not in the candidate pool
+    before returning selected_chunk_ids (see selection/llm_selector.py) --
+    this makes that guarantee explicit and checkable against real saved
+    results, not just assumed.
+
+    selected_count == 0 is flagged but NOT resolved here: a saved
+    results.jsonl only has the parsed (possibly-empty) selected_candidate_ids
+    list, not the model's raw text response, so an intentional empty
+    selection can't be told apart from a parsing failure from this data
+    alone. Use inspect_task_selection() to re-run a specific task and
+    capture raw_response for a definitive answer.
+    """
+    rows = []
+    for r in results:
+        if r.get("error") is not None:
+            rows.append(
+                {
+                    "task_id": r["task_id"],
+                    "candidate_count": None,
+                    "selected_count": None,
+                    "selection_valid": None,
+                    "reason": f"task failed before selection: {r['error']}",
+                }
+            )
+            continue
+
+        candidate_ids = set(r["candidate_ids"])
+        selected_ids = set(r["selected_candidate_ids"])
+        is_subset = selected_ids.issubset(candidate_ids)
+
+        if r["selected_count"] == 0:
+            reason = (
+                "empty selection -- cannot tell intentional vs. parsing failure from "
+                "saved results alone (raw_response not captured in this run); "
+                "use inspect_task_selection() to re-run and check"
+            )
+        elif not is_subset:
+            reason = f"INVALID: selected label(s) {sorted(selected_ids - candidate_ids)} not in candidate pool"
+        else:
+            reason = f"{r['selected_count']}/{r['candidate_count']} candidate(s) selected, all valid"
+
+        rows.append(
+            {
+                "task_id": r["task_id"],
+                "candidate_count": r["candidate_count"],
+                "selected_count": r["selected_count"],
+                "selection_valid": is_subset,
+                "reason": reason,
+            }
+        )
+    return rows
+
+
+def print_selection_validity_table(rows: List[Dict]) -> None:
+    header = f"{'task_id':<24} | {'candidate_count':>16} | {'selected_count':>14} | {'selection_valid':>15} | reason"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        print(
+            f"{row['task_id']:<24} | {str(row['candidate_count']):>16} | {str(row['selected_count']):>14} | "
+            f"{str(row['selection_valid']):>15} | {row['reason']}"
+        )
+
+
+def inspect_task_selection(
+    task_id: str,
+    jsonl_path: str = DEFAULT_JSONL,
+    selector: Optional[LLMSelector] = None,
+    repos_dir: str = DEFAULT_REPOS_DIR,
+    index_dir: str = DEFAULT_INDEX_DIR,
+) -> Dict:
+    """Re-runs retrieval + selection ONLY (no generation) for one task, to
+    capture Qwen's raw text response before parsing -- the one piece of
+    evidence that can tell an intentional empty selection apart from a
+    parsing failure. Uses the same unmodified CandidatePipeline/LLMSelector
+    as run_one_example(); just skips the (unneeded, slower) generation step.
+    """
+    index = find_example_index_by_task_id(jsonl_path, task_id)
+    example = load_cceval_example(jsonl_path, index)
+    chunks = locate_repo_index(example["repository"], repos_dir=repos_dir, index_dir=index_dir)
+
+    pipeline = CandidatePipeline(BM25Retriever(chunks), SymbolRetriever(chunks), DependencyRetriever(chunks))
+    candidates = pipeline.nominate(example["prompt"], target_file=example["file"])
+
+    if selector is None:
+        selector = LLMSelector(chunks)
+    selection = selector.select(example["prompt"], example["file"], candidates)
+
+    labels = assign_candidate_labels(candidates)
+    return {
+        "task_id": task_id,
+        "candidate_count": len(candidates),
+        "candidate_labels": [labels[c["chunk_id"]] for c in candidates],
+        "selected_chunk_ids": selection["selected_chunk_ids"],
+        "selected_labels": [labels[cid] for cid in selection["selected_chunk_ids"] if cid in labels],
+        "rejected_hallucinated_ids": selection["rejected_hallucinated_ids"],
+        "raw_response": selection["raw_response"],
+    }
+
+
+def print_task_selection_diagnosis(diagnosis: Dict) -> None:
+    print(f"task_id: {diagnosis['task_id']}")
+    print(f"candidate_count: {diagnosis['candidate_count']}  labels: {diagnosis['candidate_labels']}")
+    print(f"selected_labels: {diagnosis['selected_labels']}")
+    print(f"rejected_hallucinated_ids: {diagnosis['rejected_hallucinated_ids']}")
+    print("raw_response (Qwen's actual text, before parsing):")
+    print(f"  {diagnosis['raw_response']!r}")
+    print()
+
+    if diagnosis["selected_labels"]:
+        print("=> non-empty selection, nothing to diagnose here.")
+        return
+
+    raw = diagnosis["raw_response"].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        print("=> LIKELY A PARSING FAILURE: raw_response is not valid JSON at all; the")
+        print("   parser fell back to an empty list rather than any real model choice.")
+        return
+
+    if (isinstance(parsed, dict) and parsed.get("selected_chunk_ids") == []) or parsed == []:
+        print("=> INTENTIONAL EMPTY SELECTION: raw_response is valid JSON explicitly")
+        print("   saying no candidates are useful -- not a parsing failure.")
+    else:
+        print("=> AMBIGUOUS: raw_response is valid JSON but doesn't look like a clean")
+        print("   empty selection -- inspect the raw text above manually.")

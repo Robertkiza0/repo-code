@@ -110,6 +110,8 @@ def run_one_example(
         "num_candidates": len(candidates),
         "candidates": candidates,
         "selected_chunk_ids": selection["selected_chunk_ids"],
+        "rejected_hallucinated_ids": selection["rejected_hallucinated_ids"],
+        "raw_response": selection["raw_response"],
         "completion": generated["completion"],
     }
 

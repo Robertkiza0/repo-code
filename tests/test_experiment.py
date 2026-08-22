@@ -221,5 +221,152 @@ class PrintFunctionsTest(unittest.TestCase):
         self.assertIn("ERROR: RuntimeError: boom", output)
 
 
+class CheckSelectionValidityTest(unittest.TestCase):
+    def test_valid_non_empty_selection(self):
+        from evaluation.experiment import check_selection_validity
+
+        results = [
+            {
+                "task_id": "t1",
+                "error": None,
+                "candidate_count": 3,
+                "selected_count": 2,
+                "candidate_ids": ["C1", "C2", "C3"],
+                "selected_candidate_ids": ["C1", "C2"],
+            }
+        ]
+        rows = check_selection_validity(results)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["selection_valid"])
+        self.assertIn("2/3", rows[0]["reason"])
+
+    def test_empty_selection_is_flagged_but_not_resolved(self):
+        from evaluation.experiment import check_selection_validity
+
+        results = [
+            {
+                "task_id": "t1",
+                "error": None,
+                "candidate_count": 5,
+                "selected_count": 0,
+                "candidate_ids": ["C1", "C2", "C3", "C4", "C5"],
+                "selected_candidate_ids": [],
+            }
+        ]
+        rows = check_selection_validity(results)
+        self.assertTrue(rows[0]["selection_valid"])  # trivially true: empty set is a subset of anything
+        self.assertIn("cannot tell intentional vs. parsing failure", rows[0]["reason"])
+
+    def test_selected_id_outside_candidate_pool_is_invalid(self):
+        from evaluation.experiment import check_selection_validity
+
+        results = [
+            {
+                "task_id": "t1",
+                "error": None,
+                "candidate_count": 2,
+                "selected_count": 1,
+                "candidate_ids": ["C1", "C2"],
+                "selected_candidate_ids": ["C99"],  # not in the pool -- shouldn't happen, but verify detection
+            }
+        ]
+        rows = check_selection_validity(results)
+        self.assertFalse(rows[0]["selection_valid"])
+        self.assertIn("INVALID", rows[0]["reason"])
+
+    def test_failed_task_is_marked_not_applicable(self):
+        from evaluation.experiment import check_selection_validity
+
+        results = [{"task_id": "t1", "error": "LookupError: boom"}]
+        rows = check_selection_validity(results)
+        self.assertIsNone(rows[0]["selection_valid"])
+        self.assertIn("boom", rows[0]["reason"])
+
+    def test_print_selection_validity_table_runs(self):
+        from io import StringIO
+        from evaluation.experiment import check_selection_validity, print_selection_validity_table
+
+        results = [
+            {
+                "task_id": "t1", "error": None, "candidate_count": 3, "selected_count": 2,
+                "candidate_ids": ["C1", "C2", "C3"], "selected_candidate_ids": ["C1", "C2"],
+            }
+        ]
+        rows = check_selection_validity(results)
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_selection_validity_table(rows)
+        self.assertIn("t1", buf.getvalue())
+
+
+class InspectTaskSelectionTest(unittest.TestCase):
+    def test_intentional_empty_selection_is_diagnosed_correctly(self):
+        from evaluation.experiment import inspect_task_selection, print_task_selection_diagnosis
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "one_task.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1")])
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                empty_selection_backend = MagicMock()
+                empty_selection_backend.generate.return_value = json.dumps({"selected_chunk_ids": []})
+                selector = LLMSelector(chunks, backend=empty_selection_backend)
+
+                diagnosis = inspect_task_selection(
+                    "t1",
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+        self.assertEqual(diagnosis["selected_labels"], [])
+        self.assertEqual(diagnosis["raw_response"], '{"selected_chunk_ids": []}')
+
+        from io import StringIO
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_task_selection_diagnosis(diagnosis)
+        self.assertIn("INTENTIONAL EMPTY SELECTION", buf.getvalue())
+
+    def test_unparseable_response_is_diagnosed_as_parsing_failure(self):
+        from evaluation.experiment import inspect_task_selection, print_task_selection_diagnosis
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "one_task.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1")])
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                garbage_backend = MagicMock()
+                garbage_backend.generate.return_value = "I cannot help with that request."
+                selector = LLMSelector(chunks, backend=garbage_backend)
+
+                diagnosis = inspect_task_selection(
+                    "t1",
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+        self.assertEqual(diagnosis["selected_labels"], [])
+
+        from io import StringIO
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_task_selection_diagnosis(diagnosis)
+        self.assertIn("LIKELY A PARSING FAILURE", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
