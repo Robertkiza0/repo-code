@@ -119,6 +119,12 @@ class HuggingFaceGenerationBackend(GenerationBackend):
                 # when one exists; only fall back to "auto" on CPU-only machines.
                 device_map = {"": 0} if torch.cuda.is_available() else "auto"
             model_kwargs = {"device_map": device_map, "token": hf_token}
+            if torch.cuda.is_available():
+                # See selection.backends.HuggingFaceBackend -- sdpa avoids the
+                # O(seq_len^2) attention score matrices "eager" allocates,
+                # which can spike VRAM on longer prompts (e.g. several
+                # selected chunks' full source assembled into the context).
+                model_kwargs["attn_implementation"] = "sdpa"
             if load_in_4bit:
                 # Same reasoning as selection.backends.HuggingFaceBackend: fits
                 # fully on a free-tier GPU instead of getting silently

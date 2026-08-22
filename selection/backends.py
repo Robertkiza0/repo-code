@@ -92,6 +92,13 @@ class HuggingFaceBackend(SelectionBackend):
                 # exists; only fall back to "auto" on CPU-only machines.
                 device_map = {"": 0} if torch.cuda.is_available() else "auto"
             model_kwargs = {"device_map": device_map, "token": hf_token}
+            if torch.cuda.is_available():
+                # PyTorch's built-in memory-efficient attention -- "eager"
+                # (the default) allocates full O(seq_len^2) attention score
+                # matrices, which can spike VRAM usage on longer prompts even
+                # with 4-bit weights. sdpa needs no extra install and has no
+                # accuracy tradeoff.
+                model_kwargs["attn_implementation"] = "sdpa"
             if load_in_4bit:
                 # In bf16 this model needs ~15GB -- basically all of a free-tier
                 # T4's VRAM, which forces accelerate to silently offload layers
