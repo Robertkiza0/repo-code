@@ -43,6 +43,14 @@ from evaluation.min2_selection import (
     run_one_example_min2,
     summarize_min2,
 )
+from evaluation.selection_diagnosis import (
+    diagnose_task,
+    find_selection_only_failures,
+    print_diagnosis,
+    print_diagnosis_summary,
+    run_selection_diagnosis,
+    summarize_diagnosis_categories,
+)
 
 __all__ = [
     "load_cceval_example",
@@ -84,4 +92,10 @@ __all__ = [
     "print_min2_task_table",
     "print_min2_isolation_flags",
     "print_three_way_comparison",
+    "diagnose_task",
+    "find_selection_only_failures",
+    "print_diagnosis",
+    "print_diagnosis_summary",
+    "run_selection_diagnosis",
+    "summarize_diagnosis_categories",
 ]
