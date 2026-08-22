@@ -22,7 +22,6 @@ from evaluation.cceval_adapter import (
 )
 from evaluation.experiment import preflight_check, save_results_jsonl, save_summary_json
 from evaluation.metrics import edit_similarity, exact_match, identifier_f1
-from generation.backends import OllamaGenerationBackend
 from generation.generator import CompletionGenerator
 from retrieval.bm25_retriever import BM25Retriever
 from retrieval.candidate_pipeline import CandidatePipeline
@@ -43,9 +42,9 @@ _EMPTY_BASELINE_FIELDS = {
 
 
 def run_one_example_baseline(
+    generator: CompletionGenerator,
     jsonl_path: str = DEFAULT_JSONL,
     index: int = 0,
-    generator: Optional[CompletionGenerator] = None,
     repos_dir: str = DEFAULT_REPOS_DIR,
     index_dir: str = DEFAULT_INDEX_DIR,
 ) -> Dict:
@@ -54,6 +53,10 @@ def run_one_example_baseline(
     the generator -- no selection step, LLMSelector is never involved. Only
     example["prompt"]/["file"] ever reach retrieval or generation --
     groundtruth is extracted for evaluation only, never passed to either.
+
+    `generator` must be passed explicitly (e.g. CompletionGenerator with
+    HuggingFaceGenerationBackend on Colab) -- there is no local default
+    backend, since real generation only ever runs on Colab.
     """
     example = load_cceval_example(jsonl_path, index)
     chunks = locate_repo_index(example["repository"], repos_dir=repos_dir, index_dir=index_dir)
@@ -62,8 +65,6 @@ def run_one_example_baseline(
     candidates = pipeline.nominate(example["prompt"], target_file=example["file"])
     all_candidate_ids = [c["chunk_id"] for c in candidates]
 
-    if generator is None:
-        generator = CompletionGenerator(chunks, OllamaGenerationBackend())
     generated = generator.generate(example["prompt"], example["file"], all_candidate_ids)
 
     return {
@@ -79,7 +80,7 @@ def run_one_example_baseline(
 
 
 def _run_single_task_baseline(
-    jsonl_path: str, index: int, generator: Optional[CompletionGenerator], repos_dir: str, index_dir: str
+    generator: CompletionGenerator, jsonl_path: str, index: int, repos_dir: str, index_dir: str
 ) -> Dict:
     example = load_cceval_example(jsonl_path, index)
     record = {"task_id": example["task_id"]}
@@ -87,7 +88,7 @@ def _run_single_task_baseline(
     try:
         t0 = time.time()
         result = run_one_example_baseline(
-            jsonl_path, index, generator=generator, repos_dir=repos_dir, index_dir=index_dir
+            generator, jsonl_path=jsonl_path, index=index, repos_dir=repos_dir, index_dir=index_dir
         )
         generation_time = time.time() - t0
 
@@ -134,9 +135,9 @@ def summarize_baseline(task_results: List[Dict]) -> Dict:
 
 
 def run_baseline_experiment(
+    generator: CompletionGenerator,
     n_tasks: int = 20,
     jsonl_path: str = DEFAULT_JSONL,
-    generator: Optional[CompletionGenerator] = None,
     results_dir: str = DEFAULT_RESULTS_DIR,
     repos_dir: str = DEFAULT_REPOS_DIR,
     index_dir: str = DEFAULT_INDEX_DIR,
@@ -147,11 +148,14 @@ def run_baseline_experiment(
     results/cceval_{n_tasks}_baseline.jsonl and
     results/cceval_{n_tasks}_baseline_summary.json; never touches the
     selection experiment's own result files.
+
+    `generator` must be passed explicitly -- no local/Ollama default, since
+    real generation only ever runs on Colab.
     """
     preflight_check(jsonl_path, n_tasks)
 
     task_results = [
-        _run_single_task_baseline(jsonl_path, index, generator, repos_dir, index_dir) for index in range(n_tasks)
+        _run_single_task_baseline(generator, jsonl_path, index, repos_dir, index_dir) for index in range(n_tasks)
     ]
     summary = summarize_baseline(task_results)
 
