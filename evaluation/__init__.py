@@ -19,8 +19,10 @@ from evaluation.experiment import (
     print_task_selection_diagnosis,
     print_task_table,
     run_experiment,
+    run_experiment_v2,
     save_results_jsonl,
     save_summary_json,
+    selection_count_distribution,
     summarize,
 )
 from evaluation.metrics import edit_similarity, exact_match, identifier_f1
@@ -50,4 +52,6 @@ __all__ = [
     "inspect_task_selection",
     "print_task_selection_diagnosis",
     "print_parse_diagnosis",
+    "run_experiment_v2",
+    "selection_count_distribution",
 ]

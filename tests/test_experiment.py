@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
-from evaluation.experiment import preflight_check, print_summary_table, print_task_table, run_experiment, summarize
+from evaluation.experiment import (
+    preflight_check,
+    print_summary_table,
+    print_task_table,
+    run_experiment,
+    run_experiment_v2,
+    selection_count_distribution,
+    summarize,
+)
 from generation.generator import CompletionGenerator
 from selection.backends import SelectionBackend
 from selection.llm_selector import LLMSelector
@@ -426,6 +434,119 @@ class InspectTaskSelectionTest(unittest.TestCase):
         self.assertIn("raw_response:", output)
         self.assertIn("parsed_selection: []", output)
         self.assertIn("parse_status: ok", output)
+
+
+class SelectionCountDistributionTest(unittest.TestCase):
+    def test_buckets_by_selected_count(self):
+        results = [
+            {"error": None, "selected_count": 0},
+            {"error": None, "selected_count": 0},
+            {"error": None, "selected_count": 1},
+            {"error": None, "selected_count": 2},
+            {"error": None, "selected_count": 3},
+            {"error": None, "selected_count": 7},
+            {"error": "boom", "selected_count": None},  # failed tasks excluded
+        ]
+        dist = selection_count_distribution(results)
+        self.assertEqual(dist, {"0": 2, "1": 1, "2": 1, ">=3": 2})
+
+    def test_empty_results_gives_all_zero_buckets(self):
+        self.assertEqual(selection_count_distribution([]), {"0": 0, "1": 0, "2": 0, ">=3": 0})
+
+
+class RunExperimentV2Test(unittest.TestCase):
+    def test_uses_the_requested_leaner_schema_and_v2_filenames(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "tasks.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1", "x"), _make_task("t2", "y")])
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "x"
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                selector = LLMSelector(chunks, backend=FailOnCallSelectionBackend())
+                generator = CompletionGenerator(chunks, backend=generation_backend)
+
+                outcome = run_experiment_v2(
+                    n_tasks=2,
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    generator=generator,
+                    results_dir=str(Path(tmp_dir) / "results"),
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+            results = outcome["results"]
+            summary = outcome["summary"]
+
+            self.assertEqual(len(results), 2)
+            for r in results:
+                self.assertEqual(
+                    set(r.keys()),
+                    {
+                        "task_id", "candidate_count", "selected_candidate_ids", "selected_count",
+                        "raw_qwen_response", "completion", "groundtruth", "exact_match", "ES", "ID-F1",
+                        "generation_time", "error",
+                    },
+                )
+                self.assertIsNone(r["error"])
+                self.assertIn("selected_chunk_ids", r["raw_qwen_response"])  # the model's actual raw text
+                # candidate/selected sources and repository/target_file are NOT in the v2 schema
+                self.assertNotIn("candidate_sources", r)
+                self.assertNotIn("repository", r)
+
+            self.assertIn("selection_count_distribution", summary)
+
+            v2_results_path = Path(tmp_dir) / "results" / "cceval_2_results_v2.jsonl"
+            v2_summary_path = Path(tmp_dir) / "results" / "cceval_2_summary_v2.json"
+            self.assertTrue(v2_results_path.exists())
+            self.assertTrue(v2_summary_path.exists())
+            saved = [json.loads(line) for line in v2_results_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(saved), 2)
+
+    def test_does_not_touch_v1_result_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "tasks.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1")])
+            results_dir = Path(tmp_dir) / "results"
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "some completion"
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                selector1 = LLMSelector(chunks, backend=FailOnCallSelectionBackend())
+                generator1 = CompletionGenerator(chunks, backend=generation_backend)
+                run_experiment(
+                    n_tasks=1, jsonl_path=str(jsonl_path), selector=selector1, generator=generator1,
+                    results_dir=str(results_dir), repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+                v1_results_path = results_dir / "cceval_1_results.jsonl"
+                v1_mtime_before = v1_results_path.stat().st_mtime
+
+                selector2 = LLMSelector(chunks, backend=FailOnCallSelectionBackend())
+                generator2 = CompletionGenerator(chunks, backend=generation_backend)
+                run_experiment_v2(
+                    n_tasks=1, jsonl_path=str(jsonl_path), selector=selector2, generator=generator2,
+                    results_dir=str(results_dir), repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+            self.assertTrue(v1_results_path.exists())
+            self.assertEqual(v1_results_path.stat().st_mtime, v1_mtime_before)
+            self.assertTrue((results_dir / "cceval_1_results_v2.jsonl").exists())
 
 
 if __name__ == "__main__":

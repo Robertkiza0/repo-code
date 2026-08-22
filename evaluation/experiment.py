@@ -193,6 +193,9 @@ def print_summary_table(summary: Dict) -> None:
     print(f"  avg ES:               {_fmt(summary['avg_ES'])}")
     print(f"  avg ID-F1:            {_fmt(summary['avg_ID_F1'])}")
     print(f"  avg generation time:  {_fmt(summary['avg_generation_time'], '{:.2f}')}s")
+    if "selection_count_distribution" in summary:
+        dist = summary["selection_count_distribution"]
+        print(f"  selection count dist: 0={dist['0']}  1={dist['1']}  2={dist['2']}  >=3={dist['>=3']}")
 
 
 def print_task_table(task_results: List[Dict]) -> None:
@@ -342,3 +345,103 @@ def print_parse_diagnosis(diagnosis: Dict) -> None:
     print(f"raw_response: {diagnosis['raw_response']!r}")
     print(f"parsed_selection: {diagnosis['parsed_selection']}")
     print(f"parse_status: {diagnosis['parse_status']}")
+
+
+# -- v2: re-run with the fixed parser, a leaner per-task schema (adds
+# raw_qwen_response, drops repository/target_file/candidate_ids/sources --
+# already established in v1), saved separately so v1 results aren't
+# overwritten. Same unmodified retrieval/selection/generation/evaluation;
+# empty selection ([]) remains a valid, unforced outcome -- LLMSelector.select()
+# never had a minimum-selection constraint to begin with.
+
+_EMPTY_TASK_FIELDS_V2 = {
+    "candidate_count": None,
+    "selected_candidate_ids": None,
+    "selected_count": None,
+    "raw_qwen_response": None,
+    "completion": None,
+    "groundtruth": None,
+    "exact_match": None,
+    "ES": None,
+    "ID-F1": None,
+    "generation_time": None,
+}
+
+
+def _run_single_task_v2(jsonl_path: str, index: int, selector, generator, repos_dir: str, index_dir: str) -> Dict:
+    example = load_cceval_example(jsonl_path, index)
+    record = {"task_id": example["task_id"]}
+
+    try:
+        t0 = time.time()
+        result = run_one_example(
+            jsonl_path, index, selector=selector, generator=generator, repos_dir=repos_dir, index_dir=index_dir
+        )
+        generation_time = time.time() - t0
+
+        labels = assign_candidate_labels(result["candidates"])
+        selected_ids = [cid for cid in result["selected_chunk_ids"] if cid in labels]
+
+        record.update(
+            {
+                "candidate_count": result["num_candidates"],
+                "selected_candidate_ids": [labels[cid] for cid in selected_ids],
+                "selected_count": len(selected_ids),
+                "raw_qwen_response": result["raw_response"],
+                "completion": result["completion"],
+                "groundtruth": result["groundtruth"],
+                "exact_match": exact_match(result["completion"], result["groundtruth"]),
+                "ES": edit_similarity(result["completion"], result["groundtruth"]),
+                "ID-F1": identifier_f1(result["completion"], result["groundtruth"]),
+                "generation_time": generation_time,
+                "error": None,
+            }
+        )
+    except Exception as e:  # noqa: BLE001 -- one task's failure must not stop the batch
+        record.update(_EMPTY_TASK_FIELDS_V2)
+        record["error"] = f"{type(e).__name__}: {e}"
+
+    return record
+
+
+def selection_count_distribution(results: List[Dict]) -> Dict:
+    """Counts successful tasks by selected_count: exactly 0, exactly 1,
+    exactly 2, and 3 or more."""
+    successful = [r for r in results if r.get("error") is None]
+    buckets = {"0": 0, "1": 0, "2": 0, ">=3": 0}
+    for r in successful:
+        n = r["selected_count"]
+        key = str(n) if n in (0, 1, 2) else ">=3"
+        buckets[key] += 1
+    return buckets
+
+
+def run_experiment_v2(
+    n_tasks: int = 20,
+    jsonl_path: str = DEFAULT_JSONL,
+    selector: Optional[LLMSelector] = None,
+    generator: Optional[CompletionGenerator] = None,
+    results_dir: str = DEFAULT_RESULTS_DIR,
+    repos_dir: str = DEFAULT_REPOS_DIR,
+    index_dir: str = DEFAULT_INDEX_DIR,
+) -> Dict:
+    """Same unmodified pipeline as run_experiment(), re-run with the fixed
+    selection-response parser. Saves results/cceval_{n_tasks}_results_v2.jsonl
+    and results/cceval_{n_tasks}_summary_v2.json (note the _v2 suffix -- the
+    original run_experiment() output is never touched). The summary also
+    includes selection_count_distribution (counts of 0/1/2/>=3 selected).
+    """
+    preflight_check(jsonl_path, n_tasks)
+
+    task_results = [
+        _run_single_task_v2(jsonl_path, index, selector, generator, repos_dir, index_dir)
+        for index in range(n_tasks)
+    ]
+    summary = summarize(task_results)
+    summary["selection_count_distribution"] = selection_count_distribution(task_results)
+
+    results_dir_path = Path(results_dir)
+    save_results_jsonl(task_results, results_dir_path / f"cceval_{n_tasks}_results_v2.jsonl")
+    save_summary_json(summary, results_dir_path / f"cceval_{n_tasks}_summary_v2.json")
+
+    return {"results": task_results, "summary": summary}
