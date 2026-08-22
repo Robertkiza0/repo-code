@@ -26,6 +26,14 @@ from evaluation.experiment import (
     summarize,
 )
 from evaluation.metrics import edit_similarity, exact_match, identifier_f1
+from evaluation.baseline import (
+    print_baseline_isolation_flags,
+    print_baseline_summary_table,
+    print_baseline_task_table,
+    run_baseline_experiment,
+    run_one_example_baseline,
+    summarize_baseline,
+)
 
 __all__ = [
     "load_cceval_example",
@@ -54,4 +62,10 @@ __all__ = [
     "print_parse_diagnosis",
     "run_experiment_v2",
     "selection_count_distribution",
+    "run_one_example_baseline",
+    "run_baseline_experiment",
+    "summarize_baseline",
+    "print_baseline_summary_table",
+    "print_baseline_task_table",
+    "print_baseline_isolation_flags",
 ]
