@@ -268,6 +268,48 @@ def print_side_by_side(result: Dict) -> None:
     print(f"exact match: {completion.strip() == groundtruth.strip()}")
 
 
+def assign_candidate_labels(candidates: List[Dict]) -> Dict[str, str]:
+    """Maps each candidate's real chunk_id -> a short display label (C1, C2,
+    ...) in nomination order, for logging only. Purely cosmetic: the mapping
+    is rebuilt fresh per call/task and the real chunk_id is never renamed or
+    altered anywhere -- this never touches result["candidates"] or
+    result["selected_chunk_ids"], only how they're printed.
+    """
+    return {candidate["chunk_id"]: f"C{i + 1}" for i, candidate in enumerate(candidates)}
+
+
+def print_experiment_log(chunks: List[Dict], result: Dict) -> None:
+    """Concise, comparable-across-runs logging view.
+
+    Candidates and Qwen's selection are shown via short C1..Cn display
+    labels (assigned fresh per task, in nomination order) instead of full
+    chunk_ids -- display only, per assign_candidate_labels()'s docstring.
+    Retrieval/selection/generation/evaluation behavior is completely
+    unaffected; this only changes what gets printed.
+    """
+    chunk_lookup = {c["chunk_id"]: c for c in chunks}
+    labels = assign_candidate_labels(result["candidates"])
+
+    print(f"task_id={result['task_id']}  repository={result['repository']}  target_file={result['target_file']}")
+    print()
+
+    print(f"Candidates ({result['num_candidates']}):")
+    for candidate in result["candidates"]:
+        label = labels[candidate["chunk_id"]]
+        chunk = chunk_lookup.get(candidate["chunk_id"], {})
+        file_symbol = f"{chunk.get('file_path', candidate.get('file_path', '?'))}::{chunk.get('name', candidate.get('name', '?'))}"
+        print(f"  {label:4s} {file_symbol:45s} sources={candidate['sources']}")
+    print()
+
+    selected_labels = [labels[chunk_id] for chunk_id in result["selected_chunk_ids"] if chunk_id in labels]
+    print(f"Qwen selected: {', '.join(selected_labels) if selected_labels else '(none)'}")
+    print()
+
+    print(f"completion:  {result['completion']!r}")
+    print(f"groundtruth: {result['groundtruth']!r}")
+    print(f"exact_match: {result['completion'].strip() == result['groundtruth'].strip()}")
+
+
 def main() -> None:
     import argparse
 

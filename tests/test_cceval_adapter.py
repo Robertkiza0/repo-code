@@ -384,5 +384,101 @@ class PrintSideBySideTest(unittest.TestCase):
         self.assertIn("exact match: False", buf.getvalue())
 
 
+class AssignCandidateLabelsTest(unittest.TestCase):
+    def test_labels_assigned_in_nomination_order(self):
+        from evaluation.cceval_adapter import assign_candidate_labels
+
+        candidates = [
+            {"chunk_id": "a.py::foo::function:1-2"},
+            {"chunk_id": "b.py::bar::function:1-2"},
+            {"chunk_id": "c.py::baz::function:1-2"},
+        ]
+        labels = assign_candidate_labels(candidates)
+        self.assertEqual(
+            labels,
+            {
+                "a.py::foo::function:1-2": "C1",
+                "b.py::bar::function:1-2": "C2",
+                "c.py::baz::function:1-2": "C3",
+            },
+        )
+
+    def test_empty_candidates_gives_empty_mapping(self):
+        from evaluation.cceval_adapter import assign_candidate_labels
+
+        self.assertEqual(assign_candidate_labels([]), {})
+
+
+class PrintExperimentLogTest(unittest.TestCase):
+    def setUp(self):
+        self.chunks = [
+            {"chunk_id": "a.py::foo::function:1-2", "file_path": "a.py", "name": "foo", "source_code": "def foo():\n    return 1"},
+            {"chunk_id": "b.py::bar::function:1-3", "file_path": "b.py", "name": "bar", "source_code": "def bar():\n    return 2"},
+        ]
+        self.result = {
+            "task_id": "project_cc_python/62",
+            "repository": "owner-repo-abc1234",
+            "target_file": "c.py",
+            "num_candidates": 2,
+            "candidates": [
+                {"chunk_id": "a.py::foo::function:1-2", "file_path": "a.py", "name": "foo", "sources": ["bm25"], "scores": {}},
+                {"chunk_id": "b.py::bar::function:1-3", "file_path": "b.py", "name": "bar", "sources": ["dependency"], "scores": {}},
+            ],
+            "selected_chunk_ids": ["a.py::foo::function:1-2"],
+            "completion": "return 1",
+            "groundtruth": "return 1",
+        }
+
+    def test_uses_short_labels_not_raw_chunk_ids_for_candidates_and_selection(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_experiment_log
+
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_experiment_log(self.chunks, self.result)
+        output = buf.getvalue()
+
+        self.assertIn("C1", output)
+        self.assertIn("C2", output)
+        self.assertIn("Qwen selected: C1", output)
+        # the raw chunk_id text must not leak into this concise view
+        self.assertNotIn("a.py::foo::function:1-2", output)
+        self.assertNotIn("b.py::bar::function:1-3", output)
+
+    def test_shows_file_symbol_and_source_per_candidate(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_experiment_log
+
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_experiment_log(self.chunks, self.result)
+        output = buf.getvalue()
+
+        self.assertIn("a.py::foo", output)
+        self.assertIn("b.py::bar", output)
+        self.assertIn("['bm25']", output)
+        self.assertIn("['dependency']", output)
+
+    def test_does_not_dump_full_selected_source_code(self):
+        from io import StringIO
+        from evaluation.cceval_adapter import print_experiment_log
+
+        self.chunks[0]["source_code"] = "def foo():\n    " + "\n    ".join(f"line{i}" for i in range(20))
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_experiment_log(self.chunks, self.result)
+        output = buf.getvalue()
+
+        self.assertNotIn("line19", output)  # concise: no full source dump for selections
+
+    def test_original_result_dict_is_untouched(self):
+        from evaluation.cceval_adapter import print_experiment_log
+
+        original = json.loads(json.dumps(self.result))  # deep copy
+        with patch("sys.stdout", MagicMock()):
+            print_experiment_log(self.chunks, self.result)
+        self.assertEqual(self.result, original)
+
+
 if __name__ == "__main__":
     unittest.main()
