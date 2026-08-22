@@ -34,6 +34,15 @@ from evaluation.baseline import (
     run_one_example_baseline,
     summarize_baseline,
 )
+from evaluation.min2_selection import (
+    print_min2_isolation_flags,
+    print_min2_summary_table,
+    print_min2_task_table,
+    print_three_way_comparison,
+    run_min2_selection_experiment,
+    run_one_example_min2,
+    summarize_min2,
+)
 
 __all__ = [
     "load_cceval_example",
@@ -68,4 +77,11 @@ __all__ = [
     "print_baseline_summary_table",
     "print_baseline_task_table",
     "print_baseline_isolation_flags",
+    "run_one_example_min2",
+    "run_min2_selection_experiment",
+    "summarize_min2",
+    "print_min2_summary_table",
+    "print_min2_task_table",
+    "print_min2_isolation_flags",
+    "print_three_way_comparison",
 ]
