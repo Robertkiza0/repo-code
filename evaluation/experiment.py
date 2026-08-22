@@ -309,8 +309,11 @@ def inspect_task_selection(
         "candidate_labels": [labels[c["chunk_id"]] for c in candidates],
         "selected_chunk_ids": selection["selected_chunk_ids"],
         "selected_labels": [labels[cid] for cid in selection["selected_chunk_ids"] if cid in labels],
+        "parsed_selection": [labels[cid] for cid in selection["selected_chunk_ids"] if cid in labels],
         "rejected_hallucinated_ids": selection["rejected_hallucinated_ids"],
         "raw_response": selection["raw_response"],
+        "parse_status": selection["parse_status"],
+        "selection_parse_error": selection["selection_parse_error"],
     }
 
 
@@ -321,23 +324,21 @@ def print_task_selection_diagnosis(diagnosis: Dict) -> None:
     print(f"rejected_hallucinated_ids: {diagnosis['rejected_hallucinated_ids']}")
     print("raw_response (Qwen's actual text, before parsing):")
     print(f"  {diagnosis['raw_response']!r}")
+    print(f"parse_status: {diagnosis['parse_status']}")
     print()
 
-    if diagnosis["selected_labels"]:
-        print("=> non-empty selection, nothing to diagnose here.")
-        return
-
-    raw = diagnosis["raw_response"].strip()
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        print("=> LIKELY A PARSING FAILURE: raw_response is not valid JSON at all; the")
-        print("   parser fell back to an empty list rather than any real model choice.")
-        return
-
-    if (isinstance(parsed, dict) and parsed.get("selected_chunk_ids") == []) or parsed == []:
-        print("=> INTENTIONAL EMPTY SELECTION: raw_response is valid JSON explicitly")
-        print("   saying no candidates are useful -- not a parsing failure.")
+    if diagnosis["parse_status"] != "ok":
+        print(f"=> PARSING FAILURE: {diagnosis['selection_parse_error']}")
+    elif diagnosis["selected_labels"]:
+        print("=> non-empty selection, correctly parsed.")
     else:
-        print("=> AMBIGUOUS: raw_response is valid JSON but doesn't look like a clean")
-        print("   empty selection -- inspect the raw text above manually.")
+        print("=> INTENTIONAL EMPTY SELECTION: raw_response parsed successfully and")
+        print("   explicitly said no candidates are useful -- not a parsing failure.")
+
+
+def print_parse_diagnosis(diagnosis: Dict) -> None:
+    """The requested compact view: task_id / raw_response / parsed_selection / parse_status."""
+    print(f"task_id: {diagnosis['task_id']}")
+    print(f"raw_response: {diagnosis['raw_response']!r}")
+    print(f"parsed_selection: {diagnosis['parsed_selection']}")
+    print(f"parse_status: {diagnosis['parse_status']}")

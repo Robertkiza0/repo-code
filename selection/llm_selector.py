@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from selection.backends import (
     DEFAULT_OLLAMA_HOST,
@@ -20,34 +20,90 @@ DEFAULT_HOST = DEFAULT_OLLAMA_HOST
 DEFAULT_TIMEOUT = DEFAULT_OLLAMA_TIMEOUT
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _DOCSTRING_PREVIEW_LEN = 200
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strips a ```json ... ``` or ``` ... ``` markdown code fence if the
+    whole (stripped) text is wrapped in one, returning the inner text
+    unchanged otherwise. Models frequently wrap JSON responses in a fence
+    even when explicitly told to respond with JSON only."""
+    match = _CODE_FENCE_RE.match(text.strip())
+    return match.group(1).strip() if match else text
+
+
+def _try_parse_json(raw_response: str) -> Tuple[object, bool]:
+    """Attempts to parse raw_response as JSON -- first the whole thing
+    (after stripping a code fence if present), then falling back to the
+    first "[...]" block found in it (e.g. the model added stray prose
+    despite being asked for JSON only). Returns (value, True) on success,
+    or (None, False) if genuinely nothing parseable was found -- this is
+    the single source of truth for whether the response was valid JSON at
+    all, used both by parse_selected_ids() and parse_selection_response()
+    so a real parse failure is never silently indistinguishable from a
+    validly-empty response.
+    """
+    text = _strip_code_fence(raw_response)
+    try:
+        return json.loads(text), True
+    except json.JSONDecodeError:
+        pass
+
+    match = _JSON_ARRAY_RE.search(text)
+    if match:
+        try:
+            return json.loads(match.group(0)), True
+        except json.JSONDecodeError:
+            pass
+
+    return None, False
 
 
 def parse_selected_ids(raw_response: str) -> List[str]:
     """Extract a list of chunk_id strings from the model's raw text response.
 
-    Accepts either {"selected_chunk_ids": [...]} or a bare [...] list, and
-    falls back to pulling the first "[...]" block out of a noisier response
-    (e.g. the model added stray prose despite being asked for JSON only).
-    Returns [] if nothing parseable is found.
+    Accepts {"selected_chunk_ids": [...]} or a bare [...] list, optionally
+    wrapped in a ```json ... ``` code fence. Returns [] both when the
+    response validly says "nothing selected" and when it's unparseable --
+    use parse_selection_response() if you need to tell those two apart.
     """
-    text = raw_response.strip()
-    data = None
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        match = _JSON_ARRAY_RE.search(text)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                data = None
+    return parse_selection_response(raw_response)["selected_chunk_ids"]
+
+
+def parse_selection_response(raw_response: str) -> Dict:
+    """Like parse_selected_ids(), but never silently collapses a genuine
+    parse failure into an empty list. Returns:
+      {"selected_chunk_ids": [...], "parse_status": "ok", "selection_parse_error": None}
+    on success (even if the list is legitimately empty), or
+      {"selected_chunk_ids": [], "parse_status": "parse_error", "selection_parse_error": "..."}
+    if raw_response wasn't valid JSON at all (after fence-stripping and the
+    bracket-extraction fallback), so callers can distinguish "the model chose
+    nothing" from "the response was unparseable" instead of both collapsing
+    to the same empty list.
+    """
+    data, ok = _try_parse_json(raw_response)
+    if not ok:
+        return {
+            "selected_chunk_ids": [],
+            "parse_status": "parse_error",
+            "selection_parse_error": "raw_response is not valid JSON, even after stripping a markdown code fence",
+        }
 
     if isinstance(data, dict):
         data = data.get("selected_chunk_ids", [])
     if not isinstance(data, list):
-        return []
-    return [str(item) for item in data if isinstance(item, (str, int))]
+        return {
+            "selected_chunk_ids": [],
+            "parse_status": "parse_error",
+            "selection_parse_error": (
+                f"parsed JSON is a {type(data).__name__}, not a list or a "
+                '{"selected_chunk_ids": [...]} object'
+            ),
+        }
+
+    ids = [str(item) for item in data if isinstance(item, (str, int))]
+    return {"selected_chunk_ids": ids, "parse_status": "ok", "selection_parse_error": None}
 
 
 class LLMSelector:
@@ -90,11 +146,19 @@ class LLMSelector:
                 "llm_selector: target_file=%s candidate_ids=[] selected_ids=[] (no candidates offered)",
                 target_file,
             )
-            return {"selected_chunk_ids": [], "candidate_chunk_ids": [], "rejected_hallucinated_ids": [], "raw_response": ""}
+            return {
+                "selected_chunk_ids": [],
+                "candidate_chunk_ids": [],
+                "rejected_hallucinated_ids": [],
+                "raw_response": "",
+                "parse_status": "ok",
+                "selection_parse_error": None,
+            }
 
         prompt = self._build_prompt(code_before_cursor, target_file, candidates)
         raw_response = self.backend.generate(prompt)
-        proposed_ids = parse_selected_ids(raw_response)
+        parsed = parse_selection_response(raw_response)
+        proposed_ids = parsed["selected_chunk_ids"]
 
         candidate_id_set = set(candidate_ids)
         selected_ids: List[str] = []
@@ -106,18 +170,29 @@ class LLMSelector:
         rejected_ids = [chunk_id for chunk_id in proposed_ids if chunk_id not in candidate_id_set]
 
         logger.info(
-            "llm_selector: target_file=%s candidate_ids=%s selected_ids=%s rejected_hallucinated_ids=%s",
+            "llm_selector: target_file=%s candidate_ids=%s selected_ids=%s rejected_hallucinated_ids=%s "
+            "parse_status=%s",
             target_file,
             candidate_ids,
             selected_ids,
             rejected_ids,
+            parsed["parse_status"],
         )
+        if parsed["parse_status"] != "ok":
+            logger.warning(
+                "llm_selector: target_file=%s selection_parse_error=%s raw_response=%r",
+                target_file,
+                parsed["selection_parse_error"],
+                raw_response,
+            )
 
         return {
             "selected_chunk_ids": selected_ids,
             "candidate_chunk_ids": candidate_ids,
             "rejected_hallucinated_ids": rejected_ids,
             "raw_response": raw_response,
+            "parse_status": parsed["parse_status"],
+            "selection_parse_error": parsed["selection_parse_error"],
         }
 
     def _format_candidate(self, candidate: Dict) -> str:

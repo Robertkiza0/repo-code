@@ -10,7 +10,7 @@ from retrieval.bm25_retriever import BM25Retriever
 from retrieval.dependency_retriever import DependencyRetriever
 from retrieval.symbol_retriever import SymbolRetriever
 from retrieval.candidate_pipeline import CandidatePipeline
-from selection.llm_selector import LLMSelector, parse_selected_ids
+from selection.llm_selector import LLMSelector, parse_selected_ids, parse_selection_response
 from selection.backends import HuggingFaceBackend, OllamaBackend, SelectionBackend
 
 SAMPLE_REPO = Path(__file__).parent / "sample_repo"
@@ -44,6 +44,70 @@ class ParseSelectedIdsTest(unittest.TestCase):
 
     def test_non_list_value_returns_empty(self):
         self.assertEqual(parse_selected_ids('{"selected_chunk_ids": "not-a-list"}'), [])
+
+    # -- the 4 formats Qwen has actually been observed to return --
+
+    def test_format_1_raw_json_array(self):
+        self.assertEqual(parse_selected_ids('["C1", "C4"]'), ["C1", "C4"])
+
+    def test_format_2_fenced_json_array(self):
+        raw = '```json\n["C1", "C4"]\n```'
+        self.assertEqual(parse_selected_ids(raw), ["C1", "C4"])
+
+    def test_format_2_fenced_empty_json_array(self):
+        # exact case observed live for project_cc_python/67
+        raw = '```json\n[]\n```'
+        self.assertEqual(parse_selected_ids(raw), [])
+
+    def test_format_3_fenced_json_object(self):
+        raw = '```json\n{"selected_chunk_ids": ["C1", "C4"]}\n```'
+        self.assertEqual(parse_selected_ids(raw), ["C1", "C4"])
+
+    def test_format_3_fenced_empty_json_object(self):
+        # exact case observed live for project_cc_python/75
+        raw = '```json\n{\n  "selected_chunk_ids": []\n}\n```'
+        self.assertEqual(parse_selected_ids(raw), [])
+
+    def test_format_4_normal_json_object(self):
+        raw = '{"selected_chunk_ids": ["C1", "C4"]}'
+        self.assertEqual(parse_selected_ids(raw), ["C1", "C4"])
+
+    def test_fence_without_json_language_tag(self):
+        raw = '```\n["C1"]\n```'
+        self.assertEqual(parse_selected_ids(raw), ["C1"])
+
+
+class ParseSelectionResponseTest(unittest.TestCase):
+    """parse_selection_response() -- like parse_selected_ids(), but never
+    silently collapses a genuine parse failure into an empty list."""
+
+    def test_valid_empty_list_is_ok_not_an_error(self):
+        result = parse_selection_response("[]")
+        self.assertEqual(result, {"selected_chunk_ids": [], "parse_status": "ok", "selection_parse_error": None})
+
+    def test_fenced_valid_empty_object_is_ok_not_an_error(self):
+        raw = '```json\n{\n  "selected_chunk_ids": []\n}\n```'
+        result = parse_selection_response(raw)
+        self.assertEqual(result["parse_status"], "ok")
+        self.assertIsNone(result["selection_parse_error"])
+        self.assertEqual(result["selected_chunk_ids"], [])
+
+    def test_fenced_non_empty_selection_is_ok(self):
+        raw = '```json\n{"selected_chunk_ids": ["C1", "C4"]}\n```'
+        result = parse_selection_response(raw)
+        self.assertEqual(result["parse_status"], "ok")
+        self.assertEqual(result["selected_chunk_ids"], ["C1", "C4"])
+
+    def test_genuinely_unparseable_response_is_a_parse_error_not_silently_empty(self):
+        result = parse_selection_response("I cannot help with that request.")
+        self.assertEqual(result["selected_chunk_ids"], [])
+        self.assertEqual(result["parse_status"], "parse_error")
+        self.assertIsNotNone(result["selection_parse_error"])
+
+    def test_wrong_json_type_is_a_parse_error(self):
+        result = parse_selection_response('"just a string"')
+        self.assertEqual(result["parse_status"], "parse_error")
+        self.assertIsNotNone(result["selection_parse_error"])
 
 
 class LLMSelectorTest(unittest.TestCase):

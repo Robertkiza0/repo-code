@@ -112,6 +112,8 @@ def run_one_example(
         "selected_chunk_ids": selection["selected_chunk_ids"],
         "rejected_hallucinated_ids": selection["rejected_hallucinated_ids"],
         "raw_response": selection["raw_response"],
+        "parse_status": selection["parse_status"],
+        "selection_parse_error": selection["selection_parse_error"],
         "completion": generated["completion"],
     }
 

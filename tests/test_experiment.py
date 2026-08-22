@@ -327,12 +327,52 @@ class InspectTaskSelectionTest(unittest.TestCase):
 
         self.assertEqual(diagnosis["selected_labels"], [])
         self.assertEqual(diagnosis["raw_response"], '{"selected_chunk_ids": []}')
+        self.assertEqual(diagnosis["parse_status"], "ok")
 
         from io import StringIO
         buf = StringIO()
         with patch("sys.stdout", buf):
             print_task_selection_diagnosis(diagnosis)
         self.assertIn("INTENTIONAL EMPTY SELECTION", buf.getvalue())
+
+    def test_fenced_empty_selection_is_diagnosed_as_intentional_not_a_parse_failure(self):
+        # Reproduces the exact live bug: Qwen wrapped valid JSON in a
+        # markdown code fence, and it used to get misclassified as a
+        # parsing failure before the fence-stripping fix.
+        from evaluation.experiment import inspect_task_selection, print_task_selection_diagnosis
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "one_task.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1")])
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                fenced_backend = MagicMock()
+                fenced_backend.generate.return_value = "```json\n[]\n```"
+                selector = LLMSelector(chunks, backend=fenced_backend)
+
+                diagnosis = inspect_task_selection(
+                    "t1",
+                    jsonl_path=str(jsonl_path),
+                    selector=selector,
+                    repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"),
+                )
+
+        self.assertEqual(diagnosis["parse_status"], "ok")
+        self.assertEqual(diagnosis["parsed_selection"], [])
+
+        from io import StringIO
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_task_selection_diagnosis(diagnosis)
+        output = buf.getvalue()
+        self.assertIn("INTENTIONAL EMPTY SELECTION", output)
+        self.assertNotIn("PARSING FAILURE", output)
 
     def test_unparseable_response_is_diagnosed_as_parsing_failure(self):
         from evaluation.experiment import inspect_task_selection, print_task_selection_diagnosis
@@ -360,12 +400,32 @@ class InspectTaskSelectionTest(unittest.TestCase):
                 )
 
         self.assertEqual(diagnosis["selected_labels"], [])
+        self.assertEqual(diagnosis["parse_status"], "parse_error")
 
         from io import StringIO
         buf = StringIO()
         with patch("sys.stdout", buf):
             print_task_selection_diagnosis(diagnosis)
-        self.assertIn("LIKELY A PARSING FAILURE", buf.getvalue())
+        self.assertIn("PARSING FAILURE", buf.getvalue())
+
+    def test_print_parse_diagnosis_matches_the_requested_compact_format(self):
+        from evaluation.experiment import print_parse_diagnosis
+
+        diagnosis = {
+            "task_id": "project_cc_python/67",
+            "raw_response": "```json\n[]\n```",
+            "parsed_selection": [],
+            "parse_status": "ok",
+        }
+        from io import StringIO
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            print_parse_diagnosis(diagnosis)
+        output = buf.getvalue()
+        self.assertIn("task_id: project_cc_python/67", output)
+        self.assertIn("raw_response:", output)
+        self.assertIn("parsed_selection: []", output)
+        self.assertIn("parse_status: ok", output)
 
 
 if __name__ == "__main__":

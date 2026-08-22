@@ -14,6 +14,7 @@ from evaluation.experiment import (
     inspect_task_selection,
     preflight_check,
     print_selection_validity_table,
+    print_parse_diagnosis,
     print_summary_table,
     print_task_selection_diagnosis,
     print_task_table,
@@ -48,4 +49,5 @@ __all__ = [
     "print_selection_validity_table",
     "inspect_task_selection",
     "print_task_selection_diagnosis",
+    "print_parse_diagnosis",
 ]

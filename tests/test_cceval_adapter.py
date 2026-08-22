@@ -134,7 +134,7 @@ class RunOneExampleTest(unittest.TestCase):
         self.assertEqual(set(result.keys()), {
             "task_id", "repository", "target_file", "prompt", "groundtruth",
             "num_candidates", "candidates", "selected_chunk_ids", "rejected_hallucinated_ids",
-            "raw_response", "completion",
+            "raw_response", "parse_status", "selection_parse_error", "completion",
         })
 
 
