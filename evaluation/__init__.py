@@ -69,7 +69,15 @@ from evaluation.random2_selection import (
     run_random2_experiment,
     summarize_random2,
 )
-from evaluation.comparison import print_four_way_comparison
+from evaluation.comparison import print_four_way_comparison, print_memory_ablation_comparison
+from evaluation.llm_selection_with_memory import (
+    print_llm_selection_with_memory_isolation_flags,
+    print_llm_selection_with_memory_summary_table,
+    print_llm_selection_with_memory_task_table,
+    run_llm_selection_with_memory_experiment,
+    run_one_example_llm_selection_with_memory,
+    summarize_llm_selection_with_memory,
+)
 
 __all__ = [
     "load_cceval_example",
@@ -132,4 +140,11 @@ __all__ = [
     "print_random2_task_table",
     "print_random2_isolation_flags",
     "print_four_way_comparison",
+    "print_memory_ablation_comparison",
+    "run_one_example_llm_selection_with_memory",
+    "run_llm_selection_with_memory_experiment",
+    "summarize_llm_selection_with_memory",
+    "print_llm_selection_with_memory_summary_table",
+    "print_llm_selection_with_memory_task_table",
+    "print_llm_selection_with_memory_isolation_flags",
 ]

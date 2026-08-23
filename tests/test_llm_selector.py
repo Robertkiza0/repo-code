@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from indexer.repo_parser import RepoParser
+from memory.repository_memory import build_repository_memory
 from retrieval.bm25_retriever import BM25Retriever
 from retrieval.dependency_retriever import DependencyRetriever
 from retrieval.symbol_retriever import SymbolRetriever
@@ -187,6 +188,89 @@ class LLMSelectorTest(unittest.TestCase):
         with patch("selection.backends.requests.post", side_effect=requests.ConnectionError("no server")):
             with self.assertRaises(requests.ConnectionError):
                 selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
+
+
+class LLMSelectorMemoryTest(unittest.TestCase):
+    """Covers select()'s optional `memory`/`max_selected` params. The
+    zero-drift guarantee for the no-memory path is covered by every other
+    test in this file already passing unchanged -- these only test the
+    memory-augmented behavior itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+        pipeline = CandidatePipeline(
+            BM25Retriever(cls.chunks), SymbolRetriever(cls.chunks), DependencyRetriever(cls.chunks)
+        )
+        cls.candidates = pipeline.nominate("result = Greeter(", target_file="pkg/module_b.py")
+        cls.candidate_ids = [c["chunk_id"] for c in cls.candidates]
+        cls.memory = build_repository_memory(cls.chunks)
+
+    def test_prompt_is_byte_identical_without_memory(self):
+        selector = LLMSelector(self.chunks)
+        labels = selector._assign_labels(self.candidates)
+        with_none = selector._build_prompt("result = Greeter(", "pkg/module_b.py", self.candidates, labels)
+        with_explicit_none = selector._build_prompt(
+            "result = Greeter(", "pkg/module_b.py", self.candidates, labels, memory_query=None
+        )
+        self.assertEqual(with_none, with_explicit_none)
+
+    def test_memory_prompt_includes_structural_relationships_section(self):
+        selector = LLMSelector(self.chunks)
+        captured_payload = {}
+
+        def fake_post(url, json, timeout):
+            captured_payload.update(json)
+            return _mock_ollama_response('{"selected_chunk_ids": []}')
+
+        with patch("selection.backends.requests.post", side_effect=fake_post):
+            selector.select("result = Greeter(", "pkg/module_b.py", self.candidates, memory=self.memory)
+
+        prompt = captured_payload["prompt"]
+        self.assertIn("structural relationships", prompt)
+        self.assertIn("smallest SET of candidates", prompt)
+
+    def test_memory_result_includes_symbols_and_relationships_found(self):
+        selector = LLMSelector(self.chunks)
+        with patch("selection.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": ["C1"]}')
+            result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates, memory=self.memory)
+
+        self.assertIn("memory_symbols_found", result)
+        self.assertIn("memory_relationships_found", result)
+        self.assertIn("memory_augmented_candidate_count", result)
+        self.assertGreater(result["memory_augmented_candidate_count"], 0)
+        self.assertIn("Greeter", result["memory_symbols_found"])
+        self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
+
+    def test_no_memory_result_has_no_memory_keys(self):
+        selector = LLMSelector(self.chunks)
+        with patch("selection.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": []}')
+            result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
+
+        self.assertNotIn("memory_symbols_found", result)
+        self.assertNotIn("memory_relationships_found", result)
+
+    def test_max_selected_hard_caps_the_final_selection(self):
+        chosen = [f"C{i}" for i in range(1, 6)]  # 5 labels, all valid
+        selector = LLMSelector(self.chunks)
+        with patch("selection.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen}}}'.replace("'", '"'))
+            result = selector.select(
+                "result = Greeter(", "pkg/module_b.py", self.candidates, memory=self.memory, max_selected=2
+            )
+
+        self.assertEqual(len(result["selected_chunk_ids"]), 2)
+
+    def test_max_selected_without_memory_still_applies(self):
+        chosen = [f"C{i}" for i in range(1, 6)]
+        selector = LLMSelector(self.chunks)
+        with patch("selection.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen}}}'.replace("'", '"'))
+            result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates, max_selected=1)
+
+        self.assertEqual(len(result["selected_chunk_ids"]), 1)
 
 
 class FakeBackend(SelectionBackend):

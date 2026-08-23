@@ -77,3 +77,73 @@ def print_four_way_comparison(
         random2_summary.get("avg_generation_time"),
         "{:.2f}",
     )
+
+
+def print_memory_ablation_comparison(
+    no_selection_summary: Dict,
+    llm_selection_summary: Dict,
+    llm_selection_with_memory_summary: Dict,
+) -> None:
+    """Prints no selection / LLM selection / LLM selection + structured
+    repository memory side by side, plus the memory-specific stats
+    (memory-assisted selections, avg relationships retrieved, avg selected,
+    selection count distribution) needed to see whether structured memory
+    actually changed selection behavior, not just final metrics.
+    """
+    header = f"{'metric':<24} | {'no selection':>13} | {'LLM selection':>14} | {'LLM + memory':>13}"
+    print(header)
+    print("-" * len(header))
+
+    def row(label, no_sel, llm_sel, llm_mem, spec="{:.3f}"):
+        print(f"{label:<24} | {_fmt(no_sel, spec):>13} | {_fmt(llm_sel, spec):>14} | {_fmt(llm_mem, spec):>13}")
+
+    row(
+        "avg candidates",
+        no_selection_summary.get("avg_candidate_count"),
+        llm_selection_summary.get("avg_candidate_count"),
+        llm_selection_with_memory_summary.get("avg_candidate_count"),
+        "{:.2f}",
+    )
+    row(
+        "avg selected",
+        None,
+        llm_selection_summary.get("avg_selected_count"),
+        llm_selection_with_memory_summary.get("avg_selected_count"),
+        "{:.2f}",
+    )
+    row(
+        "exact match",
+        no_selection_summary.get("exact_match_rate"),
+        llm_selection_summary.get("exact_match_rate"),
+        llm_selection_with_memory_summary.get("exact_match_rate"),
+    )
+    row(
+        "ES",
+        no_selection_summary.get("avg_ES"),
+        llm_selection_summary.get("avg_ES"),
+        llm_selection_with_memory_summary.get("avg_ES"),
+    )
+    row(
+        "ID-F1",
+        no_selection_summary.get("avg_ID_F1"),
+        llm_selection_summary.get("avg_ID_F1"),
+        llm_selection_with_memory_summary.get("avg_ID_F1"),
+    )
+    row(
+        "avg generation time",
+        no_selection_summary.get("avg_generation_time"),
+        llm_selection_summary.get("avg_generation_time"),
+        llm_selection_with_memory_summary.get("avg_generation_time"),
+        "{:.2f}",
+    )
+
+    print()
+    print("=== Memory-specific stats (LLM + memory only) ===")
+    print(f"  memory-assisted selections:      {llm_selection_with_memory_summary.get('memory_assisted_selections')}")
+    print(
+        "  avg memory relationships found:  "
+        f"{_fmt(llm_selection_with_memory_summary.get('avg_memory_relationships_found'), '{:.2f}')}"
+    )
+    print(f"  avg selected candidates:         {_fmt(llm_selection_with_memory_summary.get('avg_selected_count'), '{:.2f}')}")
+    dist = llm_selection_with_memory_summary.get("selection_count_distribution") or {}
+    print(f"  selection count distribution:    0={dist.get('0')}  1={dist.get('1')}  2={dist.get('2')}  >=3={dist.get('>=3')}")

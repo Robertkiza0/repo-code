@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from memory.repository_memory import format_candidate_memory_block, query_memory
 from selection.backends import (
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
@@ -22,6 +23,9 @@ DEFAULT_TIMEOUT = DEFAULT_OLLAMA_TIMEOUT
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _DOCSTRING_PREVIEW_LEN = 200
+# Mentioned in the memory-augmented prompt as a reasonable upper bound (not
+# a target) -- callers that want it enforced pass select()'s max_selected.
+MAX_MEMORY_SELECTED_HINT = 4
 
 
 def _strip_code_fence(text: str) -> str:
@@ -138,7 +142,25 @@ class LLMSelector:
         chunks = json.loads(Path(index_path).read_text(encoding="utf-8"))
         return cls(chunks, **kwargs)
 
-    def select(self, code_before_cursor: str, target_file: str, candidates: List[Dict]) -> Dict:
+    def select(
+        self,
+        code_before_cursor: str,
+        target_file: str,
+        candidates: List[Dict],
+        memory: Optional[Dict] = None,
+        max_selected: Optional[int] = None,
+    ) -> Dict:
+        """`memory` (structured repository memory from
+        memory.build_repository_memory, or None) and `max_selected` are both
+        optional and default to the exact prior behavior -- when `memory` is
+        None, the prompt, parsing, and return value are byte-identical to
+        before structured memory existed. Passing `memory` augments each
+        candidate with the structural relationships memory.query_memory()
+        finds relevant to `code_before_cursor`, and lets the selector reason
+        about complementary (not just individually-relevant) candidates.
+        `max_selected`, if given, hard-caps the final selection regardless
+        of how many labels the model returned.
+        """
         candidate_ids = [c["chunk_id"] for c in candidates]
 
         if not candidates:
@@ -158,7 +180,8 @@ class LLMSelector:
         labels = self._assign_labels(candidates)
         label_to_chunk_id = {label: chunk_id for chunk_id, label in labels.items()}
 
-        prompt = self._build_prompt(code_before_cursor, target_file, candidates, labels)
+        memory_query = query_memory(code_before_cursor, memory) if memory is not None else None
+        prompt = self._build_prompt(code_before_cursor, target_file, candidates, labels, memory_query=memory_query)
         raw_response = self.backend.generate(prompt)
         parsed = parse_selection_response(raw_response)
         proposed_labels = parsed["selected_chunk_ids"]
@@ -176,14 +199,19 @@ class LLMSelector:
                 selected_ids.append(chunk_id)
         rejected_ids = [label for label in proposed_labels if label not in label_to_chunk_id]
 
+        if max_selected is not None and len(selected_ids) > max_selected:
+            selected_ids = selected_ids[:max_selected]
+
         logger.info(
             "llm_selector: target_file=%s candidate_ids=%s selected_ids=%s rejected_hallucinated_ids=%s "
-            "parse_status=%s",
+            "parse_status=%s memory_symbols_found=%s memory_relationships_found=%s",
             target_file,
             candidate_ids,
             selected_ids,
             rejected_ids,
             parsed["parse_status"],
+            len(memory_query["symbols_found"]) if memory_query is not None else None,
+            len(memory_query["relationships"]) if memory_query is not None else None,
         )
         if parsed["parse_status"] != "ok":
             logger.warning(
@@ -193,7 +221,7 @@ class LLMSelector:
                 raw_response,
             )
 
-        return {
+        result = {
             "selected_chunk_ids": selected_ids,
             "candidate_chunk_ids": candidate_ids,
             "rejected_hallucinated_ids": rejected_ids,
@@ -201,6 +229,13 @@ class LLMSelector:
             "parse_status": parsed["parse_status"],
             "selection_parse_error": parsed["selection_parse_error"],
         }
+        if memory_query is not None:
+            result["memory_symbols_found"] = memory_query["symbols_found"]
+            result["memory_relationships_found"] = memory_query["relationships"]
+            result["memory_augmented_candidate_count"] = sum(
+                1 for c in candidates if format_candidate_memory_block(c["chunk_id"], memory_query) is not None
+            )
+        return result
 
     def _assign_labels(self, candidates: List[Dict]) -> Dict[str, str]:
         """Maps each candidate's real chunk_id -> the short label ("C1",
@@ -211,7 +246,7 @@ class LLMSelector:
         """
         return {candidate["chunk_id"]: f"C{i + 1}" for i, candidate in enumerate(candidates)}
 
-    def _format_candidate(self, candidate: Dict, label: str) -> str:
+    def _format_candidate(self, candidate: Dict, label: str, memory_query: Optional[Dict] = None) -> str:
         chunk = self._chunk_lookup.get(candidate["chunk_id"], {})
         docstring = (chunk.get("docstring") or "").strip()
         if len(docstring) > _DOCSTRING_PREVIEW_LEN:
@@ -224,42 +259,95 @@ class LLMSelector:
         ]
         if docstring:
             lines.append(f"docstring: {docstring}")
+        if memory_query is not None:
+            block = format_candidate_memory_block(candidate["chunk_id"], memory_query)
+            if block:
+                lines.append(block)
         return "\n".join(lines)
 
     def _build_prompt(
-        self, code_before_cursor: str, target_file: str, candidates: List[Dict], labels: Dict[str, str]
+        self,
+        code_before_cursor: str,
+        target_file: str,
+        candidates: List[Dict],
+        labels: Dict[str, str],
+        memory_query: Optional[Dict] = None,
     ) -> str:
-        candidate_blocks = "\n\n".join(self._format_candidate(c, labels[c["chunk_id"]]) for c in candidates)
+        if memory_query is None:
+            candidate_blocks = "\n\n".join(self._format_candidate(c, labels[c["chunk_id"]]) for c in candidates)
+            return (
+                "You are a CONTEXT SELECTOR for repository-level code "
+                "completion. You do not write or generate code -- you only "
+                "decide which candidate chunks the code generator needs to "
+                "see.\n\n"
+                f"Target file: {target_file}\n\n"
+                f"Incomplete code:\n```\n{code_before_cursor}\n```\n\n"
+                f"Candidates:\n{candidate_blocks}\n\n"
+                "For each candidate, reason about the completion point: which "
+                "symbols, functions, classes, or objects in the incomplete "
+                "code need information from another chunk to complete "
+                "correctly? Which candidate explains the expected API, "
+                "arguments, return value, state, or behavior needed at the "
+                "cursor? Which candidate is structurally related to the "
+                "current code, even without high lexical overlap? Are there "
+                "candidates that only make sense together, providing "
+                "complementary context?\n\n"
+                "Do not select a candidate merely because it is in the same "
+                "file, was retrieved by keyword search, has a name that looks "
+                "vaguely similar, or is a dependency candidate without "
+                "evidence it is actually useful. Do not rely on lexical "
+                "similarity alone -- repository-level dependencies and "
+                "structural relationships matter more than shared words.\n\n"
+                "Prefer the smallest sufficient set; do not select candidates "
+                "just to fill a quota. However, if a candidate is clearly "
+                "relevant, select it even if its lexical overlap with the "
+                "incomplete code is low. Select multiple candidates when the "
+                "completion genuinely needs multiple pieces of repository "
+                "context. Evaluate every candidate against the completion "
+                "task before deciding.\n\n"
+                'Return only the candidate labels shown above (e.g. "C1", '
+                '"C4"), never a file name or anything else. Return JSON only '
+                "-- no explanations, rankings, markdown, or code: "
+                '{"selected_chunk_ids": ["C1", "C4"]}. If none are useful: '
+                '{"selected_chunk_ids": []}.'
+            )
+
+        candidate_blocks = "\n\n".join(
+            self._format_candidate(c, labels[c["chunk_id"]], memory_query=memory_query) for c in candidates
+        )
         return (
             "You are a CONTEXT SELECTOR for repository-level code "
             "completion. You do not write or generate code -- you only "
             "decide which candidate chunks the code generator needs to "
-            "see.\n\n"
+            "see. Some candidates below include a 'structural relationships' "
+            "section, derived offline from the repository's own structure "
+            "(containment, attributes, calls, references, imports) -- use "
+            "it to spot dependencies between candidates, not as a ranking "
+            "signal by itself.\n\n"
             f"Target file: {target_file}\n\n"
             f"Incomplete code:\n```\n{code_before_cursor}\n```\n\n"
             f"Candidates:\n{candidate_blocks}\n\n"
-            "For each candidate, reason about the completion point: which "
-            "symbols, functions, classes, or objects in the incomplete "
-            "code need information from another chunk to complete "
-            "correctly? Which candidate explains the expected API, "
-            "arguments, return value, state, or behavior needed at the "
-            "cursor? Which candidate is structurally related to the "
-            "current code, even without high lexical overlap? Are there "
-            "candidates that only make sense together, providing "
-            "complementary context?\n\n"
+            "Your goal is NOT to choose the single most relevant candidate. "
+            "It is to choose the smallest SET of candidates that together "
+            "provide sufficient information for the completion. Consider, "
+            "for each candidate: does it directly define a symbol the "
+            "incomplete code uses? Is it a dependency of another relevant "
+            "candidate? Does it show a caller/callee relationship with the "
+            "cursor's context? Does it belong to the same class/function "
+            "family as something else that's relevant? Does it show a "
+            "related usage example? Do two or more candidates provide "
+            "complementary pieces of information that are only useful "
+            "together? Avoid redundant candidates that repeat information "
+            "another selected candidate already provides.\n\n"
             "Do not select a candidate merely because it is in the same "
             "file, was retrieved by keyword search, has a name that looks "
             "vaguely similar, or is a dependency candidate without "
             "evidence it is actually useful. Do not rely on lexical "
-            "similarity alone -- repository-level dependencies and "
-            "structural relationships matter more than shared words.\n\n"
-            "Prefer the smallest sufficient set; do not select candidates "
-            "just to fill a quota. However, if a candidate is clearly "
-            "relevant, select it even if its lexical overlap with the "
-            "incomplete code is low. Select multiple candidates when the "
-            "completion genuinely needs multiple pieces of repository "
-            "context. Evaluate every candidate against the completion "
-            "task before deciding.\n\n"
+            "similarity alone.\n\n"
+            "Select as many candidates as are genuinely necessary -- this "
+            f"can be 0, 1, 2, 3, or up to {MAX_MEMORY_SELECTED_HINT}. Do not "
+            "force a fixed number; prefer the smallest sufficient set, not "
+            "a single best guess.\n\n"
             'Return only the candidate labels shown above (e.g. "C1", '
             '"C4"), never a file name or anything else. Return JSON only '
             "-- no explanations, rankings, markdown, or code: "
