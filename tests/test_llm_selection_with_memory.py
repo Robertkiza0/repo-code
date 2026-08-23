@@ -186,6 +186,101 @@ class RunOneExampleTest(unittest.TestCase):
             self.assertNotIn(secret, context_arg)
 
 
+class RandomMemoryAblationTest(unittest.TestCase):
+    def test_saves_to_a_separate_file_from_the_real_memory_run(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "tasks.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1", "x")])
+            results_dir = Path(tmp_dir) / "results"
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "x"
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                selector = LLMSelector(chunks, backend=FixedSelectionBackend(n=1))
+                generator = CompletionGenerator(chunks, backend=generation_backend)
+
+                run_llm_selection_with_memory_experiment(
+                    selector, generator, n_tasks=1, jsonl_path=str(jsonl_path),
+                    results_dir=str(results_dir), repos_dir=str(Path(tmp_dir) / "repos"),
+                    index_dir=str(Path(tmp_dir) / "indexes"), use_random_memory=True,
+                )
+
+            self.assertTrue((results_dir / "cceval_1_llm_selection_with_random_memory.jsonl").exists())
+            self.assertTrue((results_dir / "cceval_1_llm_selection_with_random_memory_summary.json").exists())
+            self.assertFalse((results_dir / "cceval_1_llm_selection_with_memory.jsonl").exists())
+
+    def test_random_memory_prompt_still_has_a_structural_relationships_section(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "tasks.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1", "x")])
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "x"
+
+            captured_prompts = []
+
+            class CapturingBackend(SelectionBackend):
+                def generate(self, prompt: str) -> str:
+                    captured_prompts.append(prompt)
+                    return json.dumps({"selected_chunk_ids": []})
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+                selector = LLMSelector(chunks, backend=CapturingBackend())
+                generator = CompletionGenerator(chunks, backend=generation_backend)
+
+                run_one_example_llm_selection_with_memory(
+                    selector, generator, jsonl_path=str(jsonl_path), index=0,
+                    repos_dir=str(Path(tmp_dir) / "repos"), index_dir=str(Path(tmp_dir) / "indexes"),
+                    use_random_memory=True, random_memory_seed=3,
+                )
+
+            self.assertTrue(any("structural relationships" in p for p in captured_prompts))
+
+    def test_deterministic_for_a_given_seed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            jsonl_path = Path(tmp_dir) / "tasks.jsonl"
+            _write_jsonl(jsonl_path, [_make_task("t1", "x")])
+
+            generation_backend = MagicMock()
+            generation_backend.generate.return_value = "x"
+
+            with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
+                "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout
+            ):
+                from indexer.repo_parser import RepoParser
+
+                chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
+
+                selector1 = LLMSelector(chunks, backend=FixedSelectionBackend(n=1))
+                generator1 = CompletionGenerator(chunks, backend=generation_backend)
+                result1 = run_one_example_llm_selection_with_memory(
+                    selector1, generator1, jsonl_path=str(jsonl_path), index=0,
+                    repos_dir=str(Path(tmp_dir) / "repos"), index_dir=str(Path(tmp_dir) / "indexes"),
+                    use_random_memory=True, random_memory_seed=5,
+                )
+
+                selector2 = LLMSelector(chunks, backend=FixedSelectionBackend(n=1))
+                generator2 = CompletionGenerator(chunks, backend=generation_backend)
+                result2 = run_one_example_llm_selection_with_memory(
+                    selector2, generator2, jsonl_path=str(jsonl_path), index=0,
+                    repos_dir=str(Path(tmp_dir) / "repos"), index_dir=str(Path(tmp_dir) / "indexes"),
+                    use_random_memory=True, random_memory_seed=5,
+                )
+
+            self.assertEqual(result1["memory_relationships_found"], result2["memory_relationships_found"])
+
+
 class RunExperimentTest(unittest.TestCase):
     def test_all_tasks_succeed_and_saves_expected_files(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -5,7 +5,11 @@ from indexer.repo_parser import RepoParser
 from memory.repository_memory import (
     build_repository_memory,
     format_candidate_memory_block,
+    merge_relationships,
+    pool_relationships,
+    pool_structural_relationships,
     query_memory,
+    randomize_memory,
 )
 
 SAMPLE_REPO = Path(__file__).parent / "sample_repo"
@@ -61,11 +65,13 @@ class BuildRepositoryMemoryTest(unittest.TestCase):
         imports = [r for r in memory["relationships"] if r["relation"] == "imports"]
         self.assertTrue(any(r["source"] == "pkg/module_b.py" and r["target"] == "module_a.py" for r in imports))
 
-    def test_depends_on_relationship_for_subclass(self):
+    def test_subclass_relationship_to_its_base_class(self):
+        # A base-class reference is now the more precise "inherits" (see
+        # InheritsRelationTest below), not the generic "depends_on".
         chunks = _chunks()
         memory = build_repository_memory(chunks)
-        depends_on = [r for r in memory["relationships"] if r["relation"] == "depends_on"]
-        self.assertTrue(any(r["source"] == "LoudGreeter" and r["target"] == "Greeter" for r in depends_on))
+        inherits = [r for r in memory["relationships"] if r["relation"] == "inherits"]
+        self.assertTrue(any(r["source"] == "LoudGreeter" and r["target"] == "Greeter" for r in inherits))
 
     def test_class_does_not_spuriously_call_its_own_methods(self):
         # Greeter's own chunk source contains the text of its methods' def
@@ -195,6 +201,114 @@ class FormatCandidateMemoryBlockTest(unittest.TestCase):
         query_result = query_memory("result = Greeter(", memory)
         block = format_candidate_memory_block(greeter_id, query_result, max_lines=1)
         self.assertEqual(len(block.splitlines()), 2)  # header + exactly 1 relation line
+
+
+class InheritsRelationTest(unittest.TestCase):
+    def test_subclass_inherits_base_class(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        inherits = [r for r in memory["relationships"] if r["relation"] == "inherits"]
+        self.assertTrue(any(r["source"] == "LoudGreeter" and r["target"] == "Greeter" for r in inherits))
+
+    def test_inherited_pair_is_not_also_recorded_as_generic_depends_on(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        depends_on = [
+            r for r in memory["relationships"]
+            if r["relation"] == "depends_on" and r["source"] == "LoudGreeter" and r["target"] == "Greeter"
+        ]
+        self.assertEqual(depends_on, [])
+
+
+class PoolRelationshipsTest(unittest.TestCase):
+    def test_only_includes_edges_touching_the_pool(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        loud_greeter_id = _chunk_id(chunks, "LoudGreeter")
+
+        edges = pool_relationships(memory, [greeter_id, loud_greeter_id])
+        for r in edges:
+            self.assertTrue(r.get("source_chunk_id") in {greeter_id, loud_greeter_id} or r.get("target_chunk_id") in {greeter_id, loud_greeter_id})
+        self.assertTrue(any(r["relation"] == "inherits" for r in edges))
+
+    def test_empty_pool_gives_no_edges(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        self.assertEqual(pool_relationships(memory, []), [])
+
+
+class PoolStructuralRelationshipsTest(unittest.TestCase):
+    def test_same_class_for_sibling_methods(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        init_id = _chunk_id(chunks, "__init__", class_name="Greeter")
+        greet_id = _chunk_id(chunks, "greet", class_name="Greeter")
+
+        edges = pool_structural_relationships(memory, [init_id, greet_id])
+        same_class = [r for r in edges if r["relation"] == "same_class"]
+        self.assertEqual(len(same_class), 1)
+
+    def test_same_file_for_chunks_in_the_same_file(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        format_id = _chunk_id(chunks, "_format")
+
+        edges = pool_structural_relationships(memory, [greeter_id, format_id])
+        same_file = [r for r in edges if r["relation"] == "same_file"]
+        self.assertEqual(len(same_file), 1)
+
+    def test_no_relation_for_unrelated_pair(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        loud_greeter_id = _chunk_id(chunks, "LoudGreeter")  # different file, different class
+
+        edges = pool_structural_relationships(memory, [greeter_id, loud_greeter_id])
+        self.assertEqual(edges, [])
+
+
+class MergeRelationshipsTest(unittest.TestCase):
+    def test_drops_exact_duplicates_preserving_order(self):
+        a = {"source": "X", "source_chunk_id": "x1", "relation": "calls", "target": "Y", "target_chunk_id": "y1"}
+        b = {"source": "X", "source_chunk_id": "x1", "relation": "calls", "target": "Z", "target_chunk_id": "z1"}
+        merged = merge_relationships([a], [a, b])
+        self.assertEqual(merged, [a, b])
+
+
+class RandomizeMemoryTest(unittest.TestCase):
+    def test_same_edge_count_and_relation_labels_different_targets(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        randomized = randomize_memory(memory, seed=7)
+
+        self.assertEqual(len(randomized["relationships"]), len(memory["relationships"]))
+        original_relations = [r["relation"] for r in memory["relationships"]]
+        randomized_relations = [r["relation"] for r in randomized["relationships"]]
+        self.assertEqual(original_relations, randomized_relations)  # same shape/labels
+
+    def test_deterministic_for_a_given_seed(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        r1 = randomize_memory(memory, seed=42)
+        r2 = randomize_memory(memory, seed=42)
+        self.assertEqual(r1["relationships"], r2["relationships"])
+
+    def test_different_seeds_can_give_different_targets(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        r1 = randomize_memory(memory, seed=1)
+        r2 = randomize_memory(memory, seed=2)
+        targets_1 = [r["target_chunk_id"] for r in r1["relationships"]]
+        targets_2 = [r["target_chunk_id"] for r in r2["relationships"]]
+        self.assertNotEqual(targets_1, targets_2)
+
+    def test_never_needs_groundtruth(self):
+        import inspect
+
+        sig = inspect.signature(randomize_memory)
+        self.assertEqual(list(sig.parameters), ["memory", "seed"])
 
 
 if __name__ == "__main__":

@@ -239,9 +239,39 @@ class LLMSelectorMemoryTest(unittest.TestCase):
         self.assertIn("memory_symbols_found", result)
         self.assertIn("memory_relationships_found", result)
         self.assertIn("memory_augmented_candidate_count", result)
+        self.assertIn("memory_assisted", result)
+        self.assertTrue(result["memory_assisted"])
         self.assertGreater(result["memory_augmented_candidate_count"], 0)
         self.assertIn("Greeter", result["memory_symbols_found"])
         self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
+
+    def test_memory_surfaces_relationships_between_pool_candidates_even_without_cursor_mention(self):
+        # LoudGreeter "inherits" Greeter -- a real structural link between
+        # two candidates in the pool -- must surface even though the cursor
+        # text "result = Greeter(" never mentions "LoudGreeter" at all.
+        selector = LLMSelector(self.chunks)
+        captured_payload = {}
+
+        def fake_post(url, json, timeout):
+            captured_payload.update(json)
+            return _mock_ollama_response('{"selected_chunk_ids": []}')
+
+        with patch("selection.backends.requests.post", side_effect=fake_post):
+            selector.select("result = Greeter(", "pkg/module_b.py", self.candidates, memory=self.memory)
+
+        prompt = captured_payload["prompt"]
+        self.assertIn("inherits: Greeter", prompt)
+
+    def test_memory_assisted_is_false_when_memory_finds_nothing_relevant(self):
+        selector = LLMSelector(self.chunks)
+        empty_memory = {"symbols": {}, "files": {}, "name_index": {}, "relationships": []}
+        with patch("selection.backends.requests.post") as mock_post:
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": []}')
+            result = selector.select(
+                "result = Greeter(", "pkg/module_b.py", self.candidates, memory=empty_memory
+            )
+        self.assertFalse(result["memory_assisted"])
+        self.assertEqual(result["memory_augmented_candidate_count"], 0)
 
     def test_no_memory_result_has_no_memory_keys(self):
         selector = LLMSelector(self.chunks)

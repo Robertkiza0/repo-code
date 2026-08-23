@@ -4,7 +4,13 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from memory.repository_memory import format_candidate_memory_block, query_memory
+from memory.repository_memory import (
+    format_candidate_memory_block,
+    merge_relationships,
+    pool_relationships,
+    pool_structural_relationships,
+    query_memory,
+)
 from selection.backends import (
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
@@ -180,7 +186,28 @@ class LLMSelector:
         labels = self._assign_labels(candidates)
         label_to_chunk_id = {label: chunk_id for chunk_id, label in labels.items()}
 
-        memory_query = query_memory(code_before_cursor, memory) if memory is not None else None
+        memory_query = None
+        if memory is not None:
+            # Cursor-text-driven expansion (symbols typed near the cursor)
+            # merged with relationships scoped to the CURRENT candidate pool
+            # -- the latter surfaces links between candidates (e.g. "C2 uses
+            # C3") even when neither name is literally typed at the cursor,
+            # which the cursor-only expansion alone would miss.
+            text_query = query_memory(code_before_cursor, memory)
+            pool_edges = merge_relationships(
+                pool_relationships(memory, candidate_ids),
+                pool_structural_relationships(memory, candidate_ids),
+            )
+            all_relationships = merge_relationships(text_query["relationships"], pool_edges)
+            symbols_found = sorted(
+                set(text_query["symbols_found"]) | {r["source"] for r in pool_edges} | {r["target"] for r in pool_edges}
+            )
+            memory_query = {
+                "matched_tokens": text_query["matched_tokens"],
+                "symbols_found": symbols_found,
+                "relationships": all_relationships,
+            }
+
         prompt = self._build_prompt(code_before_cursor, target_file, candidates, labels, memory_query=memory_query)
         raw_response = self.backend.generate(prompt)
         parsed = parse_selection_response(raw_response)
@@ -202,16 +229,28 @@ class LLMSelector:
         if max_selected is not None and len(selected_ids) > max_selected:
             selected_ids = selected_ids[:max_selected]
 
+        memory_augmented_candidate_count = None
+        if memory_query is not None:
+            memory_augmented_candidate_count = sum(
+                1 for c in candidates if format_candidate_memory_block(c["chunk_id"], memory_query) is not None
+            )
+        # True only if memory was both available AND actually surfaced
+        # something for at least one candidate -- an empty/irrelevant
+        # memory graph (e.g. no static relationships for this repo's
+        # candidates) counts as not having assisted this particular call.
+        memory_assisted = bool(memory_augmented_candidate_count)
+
         logger.info(
-            "llm_selector: target_file=%s candidate_ids=%s selected_ids=%s rejected_hallucinated_ids=%s "
-            "parse_status=%s memory_symbols_found=%s memory_relationships_found=%s",
+            "llm_selector: target_file=%s candidate_ids=%s proposed_ids=%s selected_ids=%s "
+            "rejected_hallucinated_ids=%s parse_status=%s memory_relationships=%s memory_assisted=%s",
             target_file,
             candidate_ids,
+            proposed_labels,
             selected_ids,
             rejected_ids,
             parsed["parse_status"],
-            len(memory_query["symbols_found"]) if memory_query is not None else None,
             len(memory_query["relationships"]) if memory_query is not None else None,
+            memory_assisted if memory_query is not None else None,
         )
         if parsed["parse_status"] != "ok":
             logger.warning(
@@ -232,9 +271,8 @@ class LLMSelector:
         if memory_query is not None:
             result["memory_symbols_found"] = memory_query["symbols_found"]
             result["memory_relationships_found"] = memory_query["relationships"]
-            result["memory_augmented_candidate_count"] = sum(
-                1 for c in candidates if format_candidate_memory_block(c["chunk_id"], memory_query) is not None
-            )
+            result["memory_augmented_candidate_count"] = memory_augmented_candidate_count
+            result["memory_assisted"] = memory_assisted
         return result
 
     def _assign_labels(self, candidates: List[Dict]) -> Dict[str, str]:

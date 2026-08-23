@@ -23,7 +23,7 @@ from evaluation.cceval_adapter import (
 from evaluation.experiment import preflight_check, save_results_jsonl, save_summary_json, summarize
 from evaluation.metrics import edit_similarity, exact_match, identifier_f1
 from generation.generator import CompletionGenerator
-from memory.repository_memory import build_repository_memory
+from memory.repository_memory import build_repository_memory, randomize_memory
 from retrieval.bm25_retriever import BM25Retriever
 from retrieval.candidate_pipeline import CandidatePipeline
 from retrieval.dependency_retriever import DependencyRetriever
@@ -31,6 +31,7 @@ from retrieval.symbol_retriever import SymbolRetriever
 from selection.llm_selector import MAX_MEMORY_SELECTED_HINT, LLMSelector
 
 DEFAULT_RESULTS_DIR = "results"
+DEFAULT_RANDOM_MEMORY_SEED = 0
 
 _EMPTY_TASK_FIELDS = {
     "candidate_count": None,
@@ -60,6 +61,8 @@ def run_one_example_llm_selection_with_memory(
     index_dir: str = DEFAULT_INDEX_DIR,
     max_selected: int = MAX_MEMORY_SELECTED_HINT,
     memory_cache: Optional[Dict[str, Dict]] = None,
+    use_random_memory: bool = False,
+    random_memory_seed: int = DEFAULT_RANDOM_MEMORY_SEED,
 ) -> Dict:
     """Same retrieval as llm_selection (BM25 + symbol + dependency,
     deduplicated, capped at 12, unmodified ordering); the only difference
@@ -72,6 +75,12 @@ def run_one_example_llm_selection_with_memory(
     ever reach retrieval, memory construction/query, or selection --
     groundtruth is extracted for evaluation only, never passed to any of
     them.
+
+    `use_random_memory`, if True, passes memory.randomize_memory()'s output
+    instead of the real memory -- the "LLM + random/noisy memory" ablation
+    control: same graph shape and relation labels, but non-informative
+    (randomly reassigned) targets, to check whether real structural
+    evidence is what helps, versus any graph-shaped prompt text.
     """
     example = load_cceval_example(jsonl_path, index)
     chunks = locate_repo_index(example["repository"], repos_dir=repos_dir, index_dir=index_dir)
@@ -80,6 +89,8 @@ def run_one_example_llm_selection_with_memory(
         memory = memory_cache[example["repository"]]
     else:
         memory = build_repository_memory(chunks)
+        if use_random_memory:
+            memory = randomize_memory(memory, seed=random_memory_seed)
         if memory_cache is not None:
             memory_cache[example["repository"]] = memory
 
@@ -118,6 +129,8 @@ def _run_single_task(
     index_dir: str,
     max_selected: int,
     memory_cache: Dict[str, Dict],
+    use_random_memory: bool = False,
+    random_memory_seed: int = DEFAULT_RANDOM_MEMORY_SEED,
 ) -> Dict:
     example = load_cceval_example(jsonl_path, index)
     record = {"task_id": example["task_id"]}
@@ -133,6 +146,8 @@ def _run_single_task(
             index_dir=index_dir,
             max_selected=max_selected,
             memory_cache=memory_cache,
+            use_random_memory=use_random_memory,
+            random_memory_seed=random_memory_seed,
         )
         generation_time = time.time() - t0
 
@@ -201,24 +216,36 @@ def run_llm_selection_with_memory_experiment(
     repos_dir: str = DEFAULT_REPOS_DIR,
     index_dir: str = DEFAULT_INDEX_DIR,
     max_selected: int = MAX_MEMORY_SELECTED_HINT,
+    use_random_memory: bool = False,
+    random_memory_seed: int = DEFAULT_RANDOM_MEMORY_SEED,
 ) -> Dict:
     """Runs the llm_selection_with_memory experiment across n_tasks. Saves
     results/cceval_{n_tasks}_llm_selection_with_memory.jsonl and
     results/cceval_{n_tasks}_llm_selection_with_memory_summary.json; never
     touches llm_selection's (or any other experiment's) own result files.
+
+    `use_random_memory=True` runs the "LLM + random/noisy memory" ablation
+    control instead (same graph shape, non-informative targets -- see
+    memory.randomize_memory()), saving separately as
+    results/cceval_{n_tasks}_llm_selection_with_random_memory.jsonl/_summary.json
+    so it never collides with the real-memory run's files.
     """
     preflight_check(jsonl_path, n_tasks)
 
     memory_cache: Dict[str, Dict] = {}
     task_results = [
-        _run_single_task(selector, generator, jsonl_path, index, repos_dir, index_dir, max_selected, memory_cache)
+        _run_single_task(
+            selector, generator, jsonl_path, index, repos_dir, index_dir, max_selected, memory_cache,
+            use_random_memory=use_random_memory, random_memory_seed=random_memory_seed,
+        )
         for index in range(n_tasks)
     ]
     summary = summarize_llm_selection_with_memory(task_results)
 
+    suffix = "llm_selection_with_random_memory" if use_random_memory else "llm_selection_with_memory"
     results_dir_path = Path(results_dir)
-    save_results_jsonl(task_results, results_dir_path / f"cceval_{n_tasks}_llm_selection_with_memory.jsonl")
-    save_summary_json(summary, results_dir_path / f"cceval_{n_tasks}_llm_selection_with_memory_summary.json")
+    save_results_jsonl(task_results, results_dir_path / f"cceval_{n_tasks}_{suffix}.jsonl")
+    save_summary_json(summary, results_dir_path / f"cceval_{n_tasks}_{suffix}_summary.json")
 
     return {"results": task_results, "summary": summary}
 

@@ -21,27 +21,52 @@ appear in a chunk's source and match another known symbol's name, and
 import-line resolution) -- nothing is inferred semantically.
 """
 import keyword
+import random as _random_module
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from retrieval.bm25_retriever import tokenize
 from retrieval.dependency_retriever import DependencyRetriever
 
 _ATTRIBUTE_ASSIGN_RE = re.compile(r"\bself\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)")
+_CLASS_BASES_RE = re.compile(r"class\s+\w+\s*\(([^)]*)\)")
 _STOPWORDS = set(keyword.kwlist) | {"self", "cls"}
 
 # Relations pointing the "reverse" direction of the ones stored in
 # memory["relationships"], used only when formatting a candidate block from
 # that candidate's own point of view (e.g. a method shown as "part_of" its
-# class, rather than only ever seeing "ClassX contains MethodY").
+# class, rather than only ever seeing "ClassX contains MethodY"). Symmetric
+# relations (same_class, same_file) aren't listed -- absent keys default to
+# their own name, which is already correct for a symmetric relation.
 _INVERSE_RELATION = {
     "contains": "part_of",
     "defines_attribute": "attribute_of",
     "depends_on": "depended_on_by",
+    "inherits": "inherited_by",
     "calls": "called_by",
     "references": "referenced_by",
     "imports": "imported_by",
 }
+
+
+def _extract_base_class_names(signature: str) -> List[str]:
+    """Best-effort extraction of a class's declared base names from its own
+    signature text (e.g. "class LoudGreeter(Greeter):" -> ["Greeter"]) --
+    already-available data, no new parsing. Dotted bases (e.g. "nn.Module")
+    are reduced to their last component; keyword args like "metaclass=..."
+    are skipped."""
+    match = _CLASS_BASES_RE.search(signature or "")
+    if not match:
+        return []
+    bases = []
+    for part in match.group(1).split(","):
+        token = part.strip()
+        if not token or "=" in token:
+            continue
+        name = token.split(".")[-1].strip()
+        if name.isidentifier():
+            bases.append(name)
+    return bases
 
 # Bounds how much memory context ever reaches a prompt -- this is a
 # selection aid, not a full graph dump (see module docstring / requirement
@@ -126,6 +151,24 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
         symbols[chunk["chunk_id"]]["attributes"] = attributes
         for attr in attributes:
             relationships.append(_edge(chunk["name"], chunk["chunk_id"], "defines_attribute", attr))
+
+    # class -> inherits -> base class, parsed directly from the class's own
+    # signature (e.g. "class LoudGreeter(Greeter):") -- more precise than
+    # the generic token-based "depends_on" below for this specific case, so
+    # a base-class pair is recorded as "inherits" only, not both.
+    inherits_pairs: Set[Tuple[str, str]] = set()
+    class_chunks_by_name = {c["name"]: c for c in chunks if c["type"] == "class"}
+    for chunk in chunks:
+        if chunk["type"] != "class":
+            continue
+        for base_name in _extract_base_class_names(chunk.get("signature") or ""):
+            base_chunk = class_chunks_by_name.get(base_name)
+            if base_chunk is None or base_chunk["chunk_id"] == chunk["chunk_id"]:
+                continue
+            inherits_pairs.add((chunk["chunk_id"], base_chunk["chunk_id"]))
+            relationships.append(
+                _edge(chunk["name"], chunk["chunk_id"], "inherits", base_name, base_chunk["chunk_id"])
+            )
 
     # files: imports/classes/functions, reusing DependencyRetriever for
     # import-line -> in-repo-file resolution rather than re-deriving it.
@@ -222,6 +265,8 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
                 if target_chunk_id == chunk["chunk_id"]:
                     continue
                 if target_chunk["type"] == "class":
+                    if (chunk["chunk_id"], target_chunk_id) in inherits_pairs:
+                        continue  # already recorded, more precisely, as "inherits"
                     relation = "depends_on"
                 elif _is_called(target_chunk["name"], source_code):
                     relation = "calls"
@@ -241,6 +286,111 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
         "name_index": name_index,
         "relationships": relationships,
     }
+
+
+def pool_relationships(memory: Dict, candidate_chunk_ids: List[str]) -> List[Dict]:
+    """Relationships from the full graph where at least one endpoint is a
+    chunk_id in the given candidate pool -- i.e. "only show relationships
+    involving the current candidate pool", not the whole repository graph,
+    and independent of cursor text. Complements query_memory()'s
+    cursor-driven expansion with the structural links between candidates
+    the pool itself already contains -- e.g. "C2 uses C3" surfaces even if
+    the incomplete code never literally mentions either name.
+    """
+    pool_set = set(candidate_chunk_ids)
+    return [
+        r
+        for r in memory["relationships"]
+        if r.get("source_chunk_id") in pool_set or r.get("target_chunk_id") in pool_set
+    ]
+
+
+def pool_structural_relationships(memory: Dict, candidate_chunk_ids: List[str]) -> List[Dict]:
+    """same_class / same_file relationships computed directly between
+    members of the CURRENT candidate pool only -- deliberately not
+    precomputed globally in build_repository_memory() (same_file especially
+    would be close to quadratic over a whole file's chunks); bounded by the
+    pool size (typically 8-12), so this stays cheap and compact. Symmetric:
+    emitted once per unordered pair.
+    """
+    relationships = []
+    ids = list(dict.fromkeys(candidate_chunk_ids))
+    for i, a_id in enumerate(ids):
+        a = memory["symbols"].get(a_id)
+        if a is None:
+            continue
+        for b_id in ids[i + 1 :]:
+            b = memory["symbols"].get(b_id)
+            if b is None:
+                continue
+            if a.get("class_name") and a["class_name"] == b.get("class_name"):
+                relationships.append(
+                    {
+                        "source": a["name"],
+                        "source_chunk_id": a_id,
+                        "relation": "same_class",
+                        "target": b["name"],
+                        "target_chunk_id": b_id,
+                    }
+                )
+            if a["file"] == b["file"]:
+                relationships.append(
+                    {
+                        "source": a["name"],
+                        "source_chunk_id": a_id,
+                        "relation": "same_file",
+                        "target": b["name"],
+                        "target_chunk_id": b_id,
+                    }
+                )
+    return relationships
+
+
+def merge_relationships(*relationship_lists: List[Dict]) -> List[Dict]:
+    """Concatenates relationship lists while dropping exact duplicates
+    (same source/relation/target chunk_ids), preserving first-seen order."""
+    seen = set()
+    merged = []
+    for relationships in relationship_lists:
+        for r in relationships:
+            key = (r["source"], r.get("source_chunk_id"), r["relation"], r["target"], r.get("target_chunk_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+    return merged
+
+
+def randomize_memory(memory: Dict, seed: int = 0) -> Dict:
+    """Structural control condition for ablation ("LLM + random/noisy
+    memory"): same number of relationships and the same relation label on
+    each, but every target is reassigned to a uniformly random chunk_id
+    from the graph -- so the prompt gets a graph-shaped but non-informative
+    "structural relationships" section. Used to test whether real
+    structural evidence helps selection, or whether any graph-like text
+    changes behavior regardless of truthfulness. Deterministic for a given
+    seed; only ever reshuffles a memory object already built without
+    groundtruth -- never touches groundtruth itself.
+    """
+    rng = _random_module.Random(seed)
+    chunk_ids = list(memory["symbols"].keys())
+    if not chunk_ids:
+        return {**memory, "relationships": []}
+
+    shuffled = []
+    for r in memory["relationships"]:
+        random_target_id = rng.choice(chunk_ids)
+        target_info = memory["symbols"][random_target_id]
+        shuffled.append(
+            {
+                "source": r["source"],
+                "source_chunk_id": r.get("source_chunk_id"),
+                "relation": r["relation"],
+                "target": target_info["name"],
+                "target_chunk_id": random_target_id,
+            }
+        )
+    return {**memory, "relationships": shuffled}
 
 
 def query_memory(
