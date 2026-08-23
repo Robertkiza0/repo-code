@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -39,8 +40,9 @@ class FailOnCallSelectionBackend(SelectionBackend):
         self.calls += 1
         if self.calls == self.fail_on_call:
             raise RuntimeError("simulated backend failure")
-        ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-        return json.dumps({"selected_chunk_ids": ids[:1]})
+        # candidates are shown as bare "C<n>" label lines now, not "chunk_id: X"
+        labels = re.findall(r"^C\d+$", prompt, re.MULTILINE)
+        return json.dumps({"selected_chunk_ids": labels[:1]})
 
 
 def _write_jsonl(path: Path, tasks: list) -> None:

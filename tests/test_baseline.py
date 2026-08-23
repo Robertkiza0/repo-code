@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -229,8 +230,9 @@ class RunBaselineExperimentTest(unittest.TestCase):
 
                 class _FixedSelectionBackend(SelectionBackend):
                     def generate(self, prompt: str) -> str:
-                        ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-                        return json.dumps({"selected_chunk_ids": ids[:1]})
+                        # candidates are shown as bare "C<n>" label lines now, not "chunk_id: X"
+                        labels = re.findall(r"^C\d+$", prompt, re.MULTILINE)
+                        return json.dumps({"selected_chunk_ids": labels[:1]})
 
                 chunks = [c.to_dict() for c in RepoParser(str(SAMPLE_REPO)).parse_repo()]
                 selector = LLMSelector(chunks, backend=_FixedSelectionBackend())

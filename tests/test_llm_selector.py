@@ -129,29 +129,30 @@ class LLMSelectorTest(unittest.TestCase):
         self.assertEqual(result["candidate_chunk_ids"], [])
 
     def test_valid_selection_is_returned(self):
-        chosen = [self.candidate_ids[0], self.candidate_ids[1]]
+        # The model only ever sees/returns short labels (C1, C2, ...) --
+        # select() maps them back to the real chunk_ids shown here.
         selector = LLMSelector(self.chunks)
         with patch("selection.backends.requests.post") as mock_post:
-            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": ["C1", "C2"]}')
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
-        self.assertEqual(result["selected_chunk_ids"], chosen)
+        self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0], self.candidate_ids[1]])
         self.assertEqual(result["candidate_chunk_ids"], self.candidate_ids)
         self.assertEqual(result["rejected_hallucinated_ids"], [])
 
-    def test_hallucinated_ids_are_dropped(self):
-        chosen = [self.candidate_ids[0], "totally_made_up_chunk_id"]
+    def test_hallucinated_labels_are_dropped(self):
+        # "C99" isn't a label of any offered candidate -- same hallucination
+        # handling as before, just keyed on label validity now.
         selector = LLMSelector(self.chunks)
         with patch("selection.backends.requests.post") as mock_post:
-            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": ["C1", "C99"]}')
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
-        self.assertEqual(result["rejected_hallucinated_ids"], ["totally_made_up_chunk_id"])
+        self.assertEqual(result["rejected_hallucinated_ids"], ["C99"])
 
-    def test_duplicate_ids_from_model_are_deduped(self):
-        chosen = [self.candidate_ids[0], self.candidate_ids[0]]
+    def test_duplicate_labels_from_model_are_deduped(self):
         selector = LLMSelector(self.chunks)
         with patch("selection.backends.requests.post") as mock_post:
-            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": ["C1", "C1"]}')
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
 
@@ -166,17 +167,17 @@ class LLMSelectorTest(unittest.TestCase):
         with patch("selection.backends.requests.post", side_effect=fake_post):
             result = selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
 
-        self.assertIn("not writing the completion", captured_payload["prompt"].lower())
+        self.assertIn("do not write or generate code", captured_payload["prompt"].lower())
         self.assertNotIn("completion", result)
 
     def test_logs_candidate_and_selected_ids(self):
         selector = LLMSelector(self.chunks)
-        chosen = [self.candidate_ids[0]]
         with patch("selection.backends.requests.post") as mock_post:
-            mock_post.return_value = _mock_ollama_response(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+            mock_post.return_value = _mock_ollama_response('{"selected_chunk_ids": ["C1"]}')
             with self.assertLogs("selection.llm_selector", level="INFO") as log_ctx:
                 selector.select("result = Greeter(", "pkg/module_b.py", self.candidates)
         logged = "\n".join(log_ctx.output)
+        # logging is keyed on real chunk_ids (never labels), unchanged
         self.assertIn(self.candidate_ids[0], logged)
         for cid in self.candidate_ids:
             self.assertIn(cid, logged)
@@ -215,8 +216,7 @@ class LLMSelectorCustomBackendTest(unittest.TestCase):
         self.assertIsInstance(selector.backend, OllamaBackend)
 
     def test_injected_backend_is_used_instead_of_ollama(self):
-        chosen = [self.candidate_ids[0]]
-        fake = FakeBackend(f'{{"selected_chunk_ids": {chosen!r}}}'.replace("'", '"'))
+        fake = FakeBackend('{"selected_chunk_ids": ["C1"]}')
         selector = LLMSelector(self.chunks, backend=fake)
 
         with patch("selection.backends.requests.post") as mock_post:
@@ -224,7 +224,7 @@ class LLMSelectorCustomBackendTest(unittest.TestCase):
 
         mock_post.assert_not_called()  # never touches Ollama at all
         self.assertEqual(len(fake.prompts_received), 1)
-        self.assertEqual(result["selected_chunk_ids"], chosen)
+        self.assertEqual(result["selected_chunk_ids"], [self.candidate_ids[0]])
 
 
 class HuggingFaceBackendTest(unittest.TestCase):
@@ -267,7 +267,8 @@ class HuggingFaceBackendTest(unittest.TestCase):
 
         tokenizer = MagicMock()
         tokenizer.apply_chat_template.return_value = MagicMock()
-        tokenizer.decode.return_value = f'{{"selected_chunk_ids": ["{chosen_id}"]}}'
+        # the model only ever returns the short label ("C1"), never the real chunk_id
+        tokenizer.decode.return_value = '{"selected_chunk_ids": ["C1"]}'
         model = MagicMock()
         model.generate.return_value = MagicMock()
 

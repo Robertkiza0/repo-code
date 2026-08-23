@@ -155,19 +155,26 @@ class LLMSelector:
                 "selection_parse_error": None,
             }
 
-        prompt = self._build_prompt(code_before_cursor, target_file, candidates)
+        labels = self._assign_labels(candidates)
+        label_to_chunk_id = {label: chunk_id for chunk_id, label in labels.items()}
+
+        prompt = self._build_prompt(code_before_cursor, target_file, candidates, labels)
         raw_response = self.backend.generate(prompt)
         parsed = parse_selection_response(raw_response)
-        proposed_ids = parsed["selected_chunk_ids"]
+        proposed_labels = parsed["selected_chunk_ids"]
 
-        candidate_id_set = set(candidate_ids)
+        # The model only ever sees/returns short labels (C1, C2, ...), never
+        # real chunk_ids -- map back here so everything downstream of
+        # select() (generation, evaluation, ...) still only ever deals in
+        # real chunk_ids, unchanged from before this label scheme existed.
         selected_ids: List[str] = []
         seen = set()
-        for chunk_id in proposed_ids:
-            if chunk_id in candidate_id_set and chunk_id not in seen:
+        for label in proposed_labels:
+            chunk_id = label_to_chunk_id.get(label)
+            if chunk_id is not None and chunk_id not in seen:
                 seen.add(chunk_id)
                 selected_ids.append(chunk_id)
-        rejected_ids = [chunk_id for chunk_id in proposed_ids if chunk_id not in candidate_id_set]
+        rejected_ids = [label for label in proposed_labels if label not in label_to_chunk_id]
 
         logger.info(
             "llm_selector: target_file=%s candidate_ids=%s selected_ids=%s rejected_hallucinated_ids=%s "
@@ -195,34 +202,67 @@ class LLMSelector:
             "selection_parse_error": parsed["selection_parse_error"],
         }
 
-    def _format_candidate(self, candidate: Dict) -> str:
+    def _assign_labels(self, candidates: List[Dict]) -> Dict[str, str]:
+        """Maps each candidate's real chunk_id -> the short label ("C1",
+        "C2", ...) shown to the model, in nomination order. This is the
+        ONLY id the model ever sees or is asked to return -- select() maps
+        labels back to real chunk_ids after parsing, so nothing downstream
+        of select() (generation, evaluation, ...) ever sees a label.
+        """
+        return {candidate["chunk_id"]: f"C{i + 1}" for i, candidate in enumerate(candidates)}
+
+    def _format_candidate(self, candidate: Dict, label: str) -> str:
         chunk = self._chunk_lookup.get(candidate["chunk_id"], {})
         docstring = (chunk.get("docstring") or "").strip()
         if len(docstring) > _DOCSTRING_PREVIEW_LEN:
             docstring = docstring[:_DOCSTRING_PREVIEW_LEN] + "..."
         lines = [
-            f'chunk_id: {candidate["chunk_id"]}',
-            f'  file: {chunk.get("file_path", candidate.get("file_path", "?"))}',
-            f'  type: {chunk.get("type", "?")}',
-            f'  signature: {chunk.get("signature", "?")}',
+            label,
+            f'file: {chunk.get("file_path", candidate.get("file_path", "?"))}',
+            f'type: {chunk.get("type", "?")}',
+            f'signature: {chunk.get("signature", "?")}',
         ]
         if docstring:
-            lines.append(f"  docstring: {docstring}")
+            lines.append(f"docstring: {docstring}")
         return "\n".join(lines)
 
-    def _build_prompt(self, code_before_cursor: str, target_file: str, candidates: List[Dict]) -> str:
-        candidate_blocks = "\n\n".join(self._format_candidate(c) for c in candidates)
+    def _build_prompt(
+        self, code_before_cursor: str, target_file: str, candidates: List[Dict], labels: Dict[str, str]
+    ) -> str:
+        candidate_blocks = "\n\n".join(self._format_candidate(c, labels[c["chunk_id"]]) for c in candidates)
         return (
-            "You are helping select useful context for completing Python code. "
-            "You are NOT writing the completion -- only choosing which candidate code "
-            "chunks would help.\n\n"
+            "You are a CONTEXT SELECTOR for repository-level code "
+            "completion. You do not write or generate code -- you only "
+            "decide which candidate chunks the code generator needs to "
+            "see.\n\n"
             f"Target file: {target_file}\n\n"
-            "Incomplete code (the cursor is at the end):\n"
-            f"```\n{code_before_cursor}\n```\n\n"
-            f"Candidate chunks:\n{candidate_blocks}\n\n"
-            'Return a JSON object with exactly one key, "selected_chunk_ids", whose value '
-            "is a list of the chunk_id strings above that would be useful context for "
-            "completing the code. Only use chunk_id values exactly as listed above -- do "
-            "not invent new ones. If none are useful, return an empty list. Do not write "
-            "any code. Do not explain your answer. Respond with JSON only."
+            f"Incomplete code:\n```\n{code_before_cursor}\n```\n\n"
+            f"Candidates:\n{candidate_blocks}\n\n"
+            "For each candidate, reason about the completion point: which "
+            "symbols, functions, classes, or objects in the incomplete "
+            "code need information from another chunk to complete "
+            "correctly? Which candidate explains the expected API, "
+            "arguments, return value, state, or behavior needed at the "
+            "cursor? Which candidate is structurally related to the "
+            "current code, even without high lexical overlap? Are there "
+            "candidates that only make sense together, providing "
+            "complementary context?\n\n"
+            "Do not select a candidate merely because it is in the same "
+            "file, was retrieved by keyword search, has a name that looks "
+            "vaguely similar, or is a dependency candidate without "
+            "evidence it is actually useful. Do not rely on lexical "
+            "similarity alone -- repository-level dependencies and "
+            "structural relationships matter more than shared words.\n\n"
+            "Prefer the smallest sufficient set; do not select candidates "
+            "just to fill a quota. However, if a candidate is clearly "
+            "relevant, select it even if its lexical overlap with the "
+            "incomplete code is low. Select multiple candidates when the "
+            "completion genuinely needs multiple pieces of repository "
+            "context. Evaluate every candidate against the completion "
+            "task before deciding.\n\n"
+            'Return only the candidate labels shown above (e.g. "C1", '
+            '"C4"), never a file name or anything else. Return JSON only '
+            "-- no explanations, rankings, markdown, or code: "
+            '{"selected_chunk_ids": ["C1", "C4"]}. If none are useful: '
+            '{"selected_chunk_ids": []}.'
         )

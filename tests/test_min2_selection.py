@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -52,8 +53,9 @@ class FixedSelectionBackend(SelectionBackend):
         self.num_to_select = num_to_select
 
     def generate(self, prompt: str) -> str:
-        ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-        return json.dumps({"selected_chunk_ids": ids[: self.num_to_select]})
+        # candidates are shown as bare "C<n>" label lines now, not "chunk_id: X"
+        labels = re.findall(r"^C\d+$", prompt, re.MULTILINE)
+        return json.dumps({"selected_chunk_ids": labels[: self.num_to_select]})
 
 
 class RunOneExampleMin2Test(unittest.TestCase):
@@ -134,8 +136,7 @@ class RunOneExampleMin2Test(unittest.TestCase):
             class CapturingSelectionBackend(SelectionBackend):
                 def generate(self, prompt: str) -> str:
                     captured_prompts.append(prompt)
-                    ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-                    return json.dumps({"selected_chunk_ids": ids[:0]})
+                    return json.dumps({"selected_chunk_ids": []})
 
             with patch("evaluation.cceval_adapter.resolve_owner_repo", return_value=("o", "r", "c")), patch(
                 "evaluation.cceval_adapter.clone_and_checkout", side_effect=_fake_clone_and_checkout

@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,10 +33,10 @@ class FakeSelectionBackend(SelectionBackend):
 
     def generate(self, prompt: str) -> str:
         self.prompts_received.append(prompt)
-        # Pull "chunk_id: X" lines back out of the prompt we were just given,
+        # Pull "C<n>" label lines back out of the prompt we were just given,
         # so this stays correct regardless of which candidates were offered.
-        ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-        return json.dumps({"selected_chunk_ids": ids[: self.n]})
+        labels = re.findall(r"^C\d+$", prompt, re.MULTILINE)
+        return json.dumps({"selected_chunk_ids": labels[: self.n]})
 
 
 class CompletionGeneratorTest(unittest.TestCase):

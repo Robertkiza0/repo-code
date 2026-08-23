@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -82,8 +83,9 @@ class FakeSelectionBackend(SelectionBackend):
         self.n = n
 
     def generate(self, prompt: str) -> str:
-        ids = [line.split("chunk_id: ", 1)[1] for line in prompt.splitlines() if line.startswith("chunk_id: ")]
-        return json.dumps({"selected_chunk_ids": ids[: self.n]})
+        # candidates are shown as bare "C<n>" label lines now, not "chunk_id: X"
+        labels = re.findall(r"^C\d+$", prompt, re.MULTILINE)
+        return json.dumps({"selected_chunk_ids": labels[: self.n]})
 
 
 class RunOneExampleTest(unittest.TestCase):
