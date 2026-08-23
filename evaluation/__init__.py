@@ -51,6 +51,23 @@ from evaluation.selection_diagnosis import (
     run_selection_diagnosis,
     summarize_diagnosis_categories,
 )
+from evaluation.top2_selection import (
+    print_top2_isolation_flags,
+    print_top2_summary_table,
+    print_top2_task_table,
+    run_one_example_top2,
+    run_top2_experiment,
+    summarize_top2,
+)
+from evaluation.random2_selection import (
+    print_random2_isolation_flags,
+    print_random2_summary_table,
+    print_random2_task_table,
+    run_one_example_random2,
+    run_random2_experiment,
+    summarize_random2,
+)
+from evaluation.comparison import print_four_way_comparison
 
 __all__ = [
     "load_cceval_example",
@@ -98,4 +115,17 @@ __all__ = [
     "print_diagnosis_summary",
     "run_selection_diagnosis",
     "summarize_diagnosis_categories",
+    "run_one_example_top2",
+    "run_top2_experiment",
+    "summarize_top2",
+    "print_top2_summary_table",
+    "print_top2_task_table",
+    "print_top2_isolation_flags",
+    "run_one_example_random2",
+    "run_random2_experiment",
+    "summarize_random2",
+    "print_random2_summary_table",
+    "print_random2_task_table",
+    "print_random2_isolation_flags",
+    "print_four_way_comparison",
 ]
