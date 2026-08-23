@@ -45,6 +45,7 @@ _INVERSE_RELATION = {
     "inherits": "inherited_by",
     "calls": "called_by",
     "references": "referenced_by",
+    "uses_attribute": "attribute_used_by",
     "imports": "imported_by",
 }
 
@@ -234,6 +235,16 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
     for chunk in chunks:
         name_to_chunk_ids.setdefault(chunk["name"].lower(), []).append(chunk["chunk_id"])
 
+    # attribute name (lowercased) -> [(owning class chunk_id, real attribute
+    # name), ...], for detecting "uses_attribute" edges -- e.g. a chunk
+    # whose source contains "settings.token_repetition_penalty_max" gets an
+    # edge to Settings via its attribute, even though "token_repetition_..."
+    # is never a class/function/method name on its own.
+    attr_owner_by_name: Dict[str, List[Tuple[str, str]]] = {}
+    for owner_chunk_id, info in symbols.items():
+        for attr in info["attributes"]:
+            attr_owner_by_name.setdefault(attr.lower(), []).append((owner_chunk_id, attr))
+
     call_re_cache: Dict[str, re.Pattern] = {}
 
     def _is_called(name: str, source: str) -> bool:
@@ -258,27 +269,42 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
             {m.lower() for m in symbols[chunk["chunk_id"]]["methods"]} if chunk["type"] == "class" else set()
         )
         for token in tokens:
-            if token == own_name_lower or token in own_method_names_lower or token not in name_to_chunk_ids:
-                continue
-            for target_chunk_id in name_to_chunk_ids[token]:
-                target_chunk = chunk_by_id[target_chunk_id]
-                if target_chunk_id == chunk["chunk_id"]:
-                    continue
-                if target_chunk["type"] == "class":
-                    if (chunk["chunk_id"], target_chunk_id) in inherits_pairs:
-                        continue  # already recorded, more precisely, as "inherits"
-                    relation = "depends_on"
-                elif _is_called(target_chunk["name"], source_code):
-                    relation = "calls"
-                else:
-                    relation = "references"
-                edge_key = f"{chunk['chunk_id']}|{relation}|{target_chunk_id}"
-                if edge_key in seen_edges:
-                    continue
-                seen_edges.add(edge_key)
-                relationships.append(
-                    _edge(chunk["name"], chunk["chunk_id"], relation, target_chunk["name"], target_chunk_id)
-                )
+            is_own_symbol = token == own_name_lower or token in own_method_names_lower
+            if not is_own_symbol and token in name_to_chunk_ids:
+                for target_chunk_id in name_to_chunk_ids[token]:
+                    target_chunk = chunk_by_id[target_chunk_id]
+                    if target_chunk_id == chunk["chunk_id"]:
+                        continue
+                    if target_chunk["type"] == "class":
+                        if (chunk["chunk_id"], target_chunk_id) in inherits_pairs:
+                            continue  # already recorded, more precisely, as "inherits"
+                        relation = "depends_on"
+                    elif _is_called(target_chunk["name"], source_code):
+                        relation = "calls"
+                    else:
+                        relation = "references"
+                    edge_key = f"{chunk['chunk_id']}|{relation}|{target_chunk_id}"
+                    if edge_key in seen_edges:
+                        continue
+                    seen_edges.add(edge_key)
+                    relationships.append(
+                        _edge(chunk["name"], chunk["chunk_id"], relation, target_chunk["name"], target_chunk_id)
+                    )
+
+            # Independent of the symbol-name check above -- a token can be
+            # an attribute name without ever being a class/function/method
+            # name (e.g. "token_repetition_penalty_max").
+            if token in attr_owner_by_name:
+                for owner_chunk_id, real_attr_name in attr_owner_by_name[token]:
+                    if owner_chunk_id == chunk["chunk_id"]:
+                        continue  # a class referencing its own attribute isn't cross-chunk usage
+                    edge_key = f"{chunk['chunk_id']}|uses_attribute|{owner_chunk_id}|{real_attr_name}"
+                    if edge_key in seen_edges:
+                        continue
+                    seen_edges.add(edge_key)
+                    relationships.append(
+                        _edge(chunk["name"], chunk["chunk_id"], "uses_attribute", real_attr_name, owner_chunk_id)
+                    )
 
     return {
         "symbols": symbols,

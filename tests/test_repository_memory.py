@@ -91,6 +91,41 @@ class BuildRepositoryMemoryTest(unittest.TestCase):
         calls = [r for r in memory["relationships"] if r["relation"] == "calls" and r["target"] == "_format"]
         self.assertTrue(len(calls) >= 1)
 
+    def test_uses_attribute_relationship_for_attribute_access_outside_the_owning_class(self):
+        # "settings.token_repetition_penalty_max"-style access: a chunk
+        # elsewhere in the repo references an attribute by name, even
+        # though that name is never a class/function/method name on its own.
+        from indexer.models import Chunk
+
+        chunks = _chunks()
+        extra = Chunk(
+            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
+            type="function", name="uses_it", class_name=None,
+            signature="def uses_it(g):", docstring=None, imports=[],
+            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
+        ).to_dict()
+        chunks = chunks + [extra]
+
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        edges = [
+            r for r in memory["relationships"]
+            if r["relation"] == "uses_attribute" and r["source_chunk_id"] == "extra.py::uses_it::function:1-2"
+        ]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["target"], "default_greeting")
+        self.assertEqual(edges[0]["target_chunk_id"], greeter_id)
+
+    def test_class_does_not_get_a_uses_attribute_edge_to_its_own_attribute(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        self_edges = [
+            r for r in memory["relationships"]
+            if r["relation"] == "uses_attribute" and r["source_chunk_id"] == greeter_id and r["target_chunk_id"] == greeter_id
+        ]
+        self.assertEqual(self_edges, [])
+
     def test_relationships_carry_exact_chunk_id_provenance(self):
         # Two different "greet" chunks (module-level function vs.
         # Greeter.greet method) must not share chunk_id-tagged edges.
