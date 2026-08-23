@@ -42,7 +42,10 @@ from retrieval.dependency_retriever import DependencyRetriever, parse_import_mod
 
 _FROM_IMPORT_SYMBOLS_RE = re.compile(r"^from\s+\.*[\w.]*\s*import\s+(.+)$")
 
-_EMPTY_DEPENDENCIES = {"calls": [], "uses": [], "imports": [], "inherits": []}
+_DEPENDENCY_CATEGORIES = (
+    "calls", "uses", "imports", "inherits", "contains", "called_by", "used_by", "subclasses", "imported_by"
+)
+_EMPTY_DEPENDENCIES = {category: [] for category in _DEPENDENCY_CATEGORIES}
 
 
 def _extract_imported_symbol_names(import_line: str) -> List[str]:
@@ -93,41 +96,68 @@ def _resolve_imports_for_file(
 
 def extract_chunk_dependencies(chunks: List[Dict], pool_chunk_ids: Optional[List[str]] = None) -> Dict[str, Dict]:
     """Returns {chunk_id: {"calls": [...], "uses": [...], "imports": [...],
-    "inherits": [...]}}:
+    "inherits": [...], "contains": [...], "called_by": [...],
+    "used_by": [...], "subclasses": [...], "imported_by": [...]}}:
 
-      calls:    [{"target": chunk_id, "symbol": name}]
-      uses:     [{"target": chunk_id_or_dotted_attr, "symbol": name,
-                  "kind": "object"|"attribute", "owner_chunk_id": chunk_id}]
-                 (owner_chunk_id is only present for kind="attribute",
-                  since "target" there is a synthetic "<owner>.<attr>"
-                  string, not itself a real chunk_id) -- kind="attribute"
-                  entries ONLY appear for chunks in `pool_chunk_ids`, and
-                  only resolve against other chunks also in that pool (see
-                  module docstring for why this isn't repo-wide).
-      imports:  [{"module": file_path_or_raw_module, "symbol": name,
-                  "resolved_target": chunk_id|None}]
-      inherits: [{"target": chunk_id, "symbol": name}]
+      calls:      [{"target": chunk_id, "symbol": name}]
+      uses:       [{"target": chunk_id_or_dotted_attr, "symbol": name,
+                    "kind": "object"|"attribute", "owner_chunk_id": chunk_id}]
+                   (owner_chunk_id is only present for kind="attribute",
+                    since "target" there is a synthetic "<owner>.<attr>"
+                    string, not itself a real chunk_id) -- kind="attribute"
+                    entries ONLY appear for chunks in `pool_chunk_ids`, and
+                    only resolve against other chunks also in that pool
+                    (see module docstring for why this isn't repo-wide).
+      imports:    [{"module": file_path_or_raw_module, "symbol": name,
+                    "resolved_target": chunk_id|None}]
+      inherits:   [{"target": chunk_id, "symbol": name}]
+      contains:   [{"target": chunk_id, "symbol": name}] -- methods AND
+                   nested classes (nested classes are recovered from
+                   line-range containment; the parser doesn't otherwise
+                   distinguish a nested class from a top-level one).
+      called_by / used_by / subclasses / imported_by: the reverse of
+                   calls / uses(kind=object) / inherits / imports -- e.g.
+                   "who calls this chunk", so retrieval can walk edges in
+                   either direction without re-deriving anything. Reverse
+                   attribute-kind "uses" edges aren't included (they're
+                   pool-scoped and directional in a way that doesn't
+                   generalize to a repo-wide reverse index).
 
-    Every "target"/"resolved_target" that IS a chunk_id is guaranteed to
-    exist in `chunks` -- nothing here is invented; unresolved references
-    keep their raw module/symbol text with resolved_target=None instead.
+    Every "target"/"resolved_target"/reverse "source" that IS a chunk_id is
+    guaranteed to exist in `chunks` -- nothing here is invented; unresolved
+    references keep their raw module/symbol text with resolved_target=None
+    instead.
     """
     memory = build_repository_memory(chunks)
-    dependencies: Dict[str, Dict] = {c["chunk_id"]: {"calls": [], "uses": [], "imports": [], "inherits": []} for c in chunks}
+    dependencies: Dict[str, Dict] = {c["chunk_id"]: {category: [] for category in _DEPENDENCY_CATEGORIES} for c in chunks}
 
     for r in memory["relationships"]:
         source_chunk_id = r.get("source_chunk_id")
-        if source_chunk_id is None or source_chunk_id not in dependencies:
-            continue
+        target_chunk_id = r.get("target_chunk_id")
+        relation = r["relation"]
 
-        if r["relation"] == "calls":
-            dependencies[source_chunk_id]["calls"].append({"target": r["target_chunk_id"], "symbol": r["target"]})
-        elif r["relation"] in ("references", "depends_on"):
-            dependencies[source_chunk_id]["uses"].append(
-                {"target": r["target_chunk_id"], "symbol": r["target"], "kind": "object"}
-            )
-        elif r["relation"] == "inherits":
-            dependencies[source_chunk_id]["inherits"].append({"target": r["target_chunk_id"], "symbol": r["target"]})
+        if source_chunk_id in dependencies:
+            if relation == "calls":
+                dependencies[source_chunk_id]["calls"].append({"target": target_chunk_id, "symbol": r["target"]})
+            elif relation in ("references", "depends_on"):
+                dependencies[source_chunk_id]["uses"].append(
+                    {"target": target_chunk_id, "symbol": r["target"], "kind": "object"}
+                )
+            elif relation == "inherits":
+                dependencies[source_chunk_id]["inherits"].append({"target": target_chunk_id, "symbol": r["target"]})
+            elif relation == "contains":
+                dependencies[source_chunk_id]["contains"].append({"target": target_chunk_id, "symbol": r["target"]})
+
+        # Reverse direction -- only for edges whose target is a real chunk
+        # (skips e.g. "defines_attribute", whose target is a bare attribute
+        # name, and "contains" targets that are attributes, not chunks).
+        if target_chunk_id in dependencies:
+            if relation == "calls":
+                dependencies[target_chunk_id]["called_by"].append({"source": source_chunk_id, "symbol": r["source"]})
+            elif relation in ("references", "depends_on"):
+                dependencies[target_chunk_id]["used_by"].append({"source": source_chunk_id, "symbol": r["source"]})
+            elif relation == "inherits":
+                dependencies[target_chunk_id]["subclasses"].append({"source": source_chunk_id, "symbol": r["source"]})
 
     if pool_chunk_ids:
         chunk_lookup = {c["chunk_id"]: c for c in chunks}
@@ -157,7 +187,26 @@ def extract_chunk_dependencies(chunks: List[Dict], pool_chunk_ids: Optional[List
             file_path, info["imports"], chunks_by_file_and_name, module_to_file
         )
     for chunk in chunks:
-        dependencies[chunk["chunk_id"]]["imports"] = imports_by_file.get(chunk["file_path"], [])
+        resolved_imports = imports_by_file.get(chunk["file_path"], [])
+        dependencies[chunk["chunk_id"]]["imports"] = resolved_imports
+        for entry in resolved_imports:
+            target = entry["resolved_target"]
+            if target in dependencies:
+                dependencies[target]["imported_by"].append({"importing_file": chunk["file_path"], "symbol": entry["symbol"]})
+
+    # imported_by can otherwise pick up one entry per chunk in the
+    # importing file (since imports are file-scoped) -- dedupe down to one
+    # per (importing_file, symbol) pair.
+    for entry in dependencies.values():
+        seen = set()
+        deduped = []
+        for item in entry["imported_by"]:
+            key = (item["importing_file"], item["symbol"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        entry["imported_by"] = deduped
 
     return dependencies
 
@@ -177,7 +226,7 @@ def attach_dependencies(chunks: List[Dict], pool_chunk_ids: Optional[List[str]] 
 def print_chunk_dependencies(chunk: Dict) -> None:
     deps = chunk.get("dependencies") or _EMPTY_DEPENDENCIES
     print(chunk["chunk_id"])
-    for category in ("calls", "uses", "imports", "inherits"):
+    for category in _DEPENDENCY_CATEGORIES:
         items = deps.get(category) or []
         if not items:
             continue
@@ -186,6 +235,10 @@ def print_chunk_dependencies(chunk: Dict) -> None:
             if category == "imports":
                 target = item.get("resolved_target") or f"{item['module']} (unresolved)"
                 print(f"    -> {target}  (symbol={item['symbol']})")
+            elif category == "imported_by":
+                print(f"    <- {item['importing_file']}  (symbol={item['symbol']})")
+            elif category in ("called_by", "used_by", "subclasses"):
+                print(f"    <- {item['source']}")
             else:
                 kind = f"  [{item['kind']}]" if "kind" in item else ""
                 print(f"    -> {item['target']}{kind}")

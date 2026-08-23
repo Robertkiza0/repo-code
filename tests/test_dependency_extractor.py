@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from indexer.dependency_extractor import (
+    _DEPENDENCY_CATEGORIES,
     attach_dependencies,
     extract_chunk_dependencies,
     print_chunk_dependencies,
@@ -25,12 +26,79 @@ def _chunk_id(chunks, name, class_name=None):
 
 
 class ExtractChunkDependenciesTest(unittest.TestCase):
-    def test_every_chunk_gets_an_entry_with_all_four_categories(self):
+    def test_every_chunk_gets_an_entry_with_all_categories(self):
         chunks = _chunks()
         dependencies = extract_chunk_dependencies(chunks)
         self.assertEqual(set(dependencies.keys()), {c["chunk_id"] for c in chunks})
         for entry in dependencies.values():
-            self.assertEqual(set(entry.keys()), {"calls", "uses", "imports", "inherits"})
+            self.assertEqual(set(entry.keys()), set(_DEPENDENCY_CATEGORIES))
+
+    def test_contains_includes_methods_and_nested_classes(self):
+        chunks = _chunks()
+        dependencies = extract_chunk_dependencies(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        greet_id = _chunk_id(chunks, "greet", class_name="Greeter")
+
+        contains = dependencies[greeter_id]["contains"]
+        self.assertTrue(any(c["target"] == greet_id and c["symbol"] == "greet" for c in contains))
+
+    def test_contains_finds_nested_class(self):
+        chunks = _chunks()
+        outer = Chunk(
+            chunk_id="nested.py::Outer::class:1-20", file_path="nested.py", language="python",
+            type="class", name="Outer", class_name=None, signature="class Outer:", docstring=None,
+            imports=[], source_code="class Outer:\n    class Inner:\n        pass",
+            start_line=1, end_line=20,
+        ).to_dict()
+        inner = Chunk(
+            chunk_id="nested.py::Inner::class:2-3", file_path="nested.py", language="python",
+            type="class", name="Inner", class_name=None, signature="class Inner:", docstring=None,
+            imports=[], source_code="class Inner:\n    pass",
+            start_line=2, end_line=3,
+        ).to_dict()
+        chunks = chunks + [outer, inner]
+        dependencies = extract_chunk_dependencies(chunks)
+
+        contains = dependencies["nested.py::Outer::class:1-20"]["contains"]
+        self.assertTrue(any(c["target"] == "nested.py::Inner::class:2-3" for c in contains))
+
+    def test_called_by_is_the_reverse_of_calls(self):
+        chunks = _chunks()
+        dependencies = extract_chunk_dependencies(chunks)
+        format_id = _chunk_id(chunks, "_format")
+        greet_method_id = _chunk_id(chunks, "greet", class_name="Greeter")
+
+        called_by = dependencies[format_id]["called_by"]
+        self.assertTrue(any(c["source"] == greet_method_id for c in called_by))
+
+    def test_subclasses_is_the_reverse_of_inherits(self):
+        chunks = _chunks()
+        dependencies = extract_chunk_dependencies(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        loud_greeter_id = _chunk_id(chunks, "LoudGreeter")
+
+        subclasses = dependencies[greeter_id]["subclasses"]
+        self.assertEqual(len(subclasses), 1)
+        self.assertEqual(subclasses[0]["source"], loud_greeter_id)
+
+    def test_imported_by_is_the_reverse_of_imports(self):
+        chunks = _chunks()
+        dependencies = extract_chunk_dependencies(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+
+        imported_by = dependencies[greeter_id]["imported_by"]
+        self.assertTrue(any(i["importing_file"] == "pkg/module_b.py" and i["symbol"] == "Greeter" for i in imported_by))
+
+    def test_imported_by_has_no_duplicate_entries_across_chunks_in_the_same_importing_file(self):
+        # imports are file-scoped, so multiple chunks in the same importing
+        # file would otherwise each contribute a duplicate imported_by entry.
+        chunks = _chunks()
+        dependencies = extract_chunk_dependencies(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+
+        imported_by = dependencies[greeter_id]["imported_by"]
+        keys = [(i["importing_file"], i["symbol"]) for i in imported_by]
+        self.assertEqual(len(keys), len(set(keys)))
 
     def test_inherits_points_at_the_real_base_class_chunk(self):
         chunks = _chunks()

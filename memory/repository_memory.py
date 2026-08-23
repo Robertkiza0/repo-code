@@ -211,6 +211,29 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
             _edge(owner["name"], owner["chunk_id"], "contains", chunk["name"], chunk["chunk_id"])
         )
 
+    # class -> contains -> nested class. The parser gives a nested class
+    # class_name=None, same as a top-level one (class_name is only ever set
+    # for methods) -- so nesting isn't otherwise visible. Recovered here
+    # from line-range containment (start_line/end_line, already on every
+    # chunk), not by touching the parser: a class B is nested in class A
+    # when B's range sits fully inside A's, in the same file. The smallest
+    # such containing class is the immediate parent (so a doubly-nested
+    # class links to its direct parent, not its grandparent).
+    class_chunks = [c for c in chunks if c["type"] == "class"]
+    for inner in class_chunks:
+        containing = [
+            c
+            for c in class_chunks
+            if c["chunk_id"] != inner["chunk_id"]
+            and c["file_path"] == inner["file_path"]
+            and c["start_line"] <= inner["start_line"]
+            and c["end_line"] >= inner["end_line"]
+        ]
+        if not containing:
+            continue
+        parent = min(containing, key=lambda c: c["end_line"] - c["start_line"])
+        relationships.append(_edge(parent["name"], parent["chunk_id"], "contains", inner["name"], inner["chunk_id"]))
+
     for chunk in chunks:
         if chunk["type"] != "class":
             continue

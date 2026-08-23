@@ -212,6 +212,67 @@ class FormatCandidateMemoryBlockTest(unittest.TestCase):
         self.assertEqual(len(block.splitlines()), 2)  # header + exactly 1 relation line
 
 
+class NestedClassContainsTest(unittest.TestCase):
+    def test_nested_class_is_linked_to_its_immediate_parent(self):
+        # The parser gives a nested class class_name=None, same as a
+        # top-level class (class_name is only ever set for methods) --
+        # this must be recovered from line-range containment instead.
+        from indexer.models import Chunk
+
+        chunks = _chunks()
+        outer = Chunk(
+            chunk_id="nested.py::Outer::class:1-20", file_path="nested.py", language="python",
+            type="class", name="Outer", class_name=None, signature="class Outer:", docstring=None,
+            imports=[], source_code="class Outer:\n    class Inner:\n        pass",
+            start_line=1, end_line=20,
+        ).to_dict()
+        inner = Chunk(
+            chunk_id="nested.py::Inner::class:2-3", file_path="nested.py", language="python",
+            type="class", name="Inner", class_name=None, signature="class Inner:", docstring=None,
+            imports=[], source_code="class Inner:\n    pass",
+            start_line=2, end_line=3,
+        ).to_dict()
+        chunks = chunks + [outer, inner]
+
+        memory = build_repository_memory(chunks)
+        contains = [
+            r for r in memory["relationships"]
+            if r["relation"] == "contains" and r["source"] == "Outer" and r["target"] == "Inner"
+        ]
+        self.assertEqual(len(contains), 1)
+        self.assertEqual(contains[0]["source_chunk_id"], "nested.py::Outer::class:1-20")
+        self.assertEqual(contains[0]["target_chunk_id"], "nested.py::Inner::class:2-3")
+
+    def test_doubly_nested_class_links_to_its_direct_parent_not_the_grandparent(self):
+        from indexer.models import Chunk
+
+        chunks = _chunks()
+        grandparent = Chunk(
+            chunk_id="nested2.py::A::class:1-30", file_path="nested2.py", language="python",
+            type="class", name="A", class_name=None, signature="class A:", docstring=None,
+            imports=[], source_code="class A: ...", start_line=1, end_line=30,
+        ).to_dict()
+        parent = Chunk(
+            chunk_id="nested2.py::B::class:2-20", file_path="nested2.py", language="python",
+            type="class", name="B", class_name=None, signature="class B:", docstring=None,
+            imports=[], source_code="class B: ...", start_line=2, end_line=20,
+        ).to_dict()
+        grandchild = Chunk(
+            chunk_id="nested2.py::C::class:3-10", file_path="nested2.py", language="python",
+            type="class", name="C", class_name=None, signature="class C:", docstring=None,
+            imports=[], source_code="class C: ...", start_line=3, end_line=10,
+        ).to_dict()
+        chunks = chunks + [grandparent, parent, grandchild]
+
+        memory = build_repository_memory(chunks)
+        c_edges = [
+            r for r in memory["relationships"]
+            if r["relation"] == "contains" and r["target"] == "C"
+        ]
+        self.assertEqual(len(c_edges), 1)
+        self.assertEqual(c_edges[0]["source"], "B")  # direct parent, not "A"
+
+
 class InheritsRelationTest(unittest.TestCase):
     def test_subclass_inherits_base_class(self):
         chunks = _chunks()
