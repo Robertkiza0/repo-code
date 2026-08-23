@@ -44,9 +44,11 @@ from evaluation.min2_selection import (
     summarize_min2,
 )
 from evaluation.selection_diagnosis import (
+    CATEGORIES as SELECTION_DIAGNOSIS_CATEGORIES,
     diagnose_task,
     find_selection_only_failures,
     print_diagnosis,
+    print_diagnosis_isolation_flags,
     print_diagnosis_summary,
     run_selection_diagnosis,
     summarize_diagnosis_categories,
@@ -112,7 +114,9 @@ __all__ = [
     "diagnose_task",
     "find_selection_only_failures",
     "print_diagnosis",
+    "print_diagnosis_isolation_flags",
     "print_diagnosis_summary",
+    "SELECTION_DIAGNOSIS_CATEGORIES",
     "run_selection_diagnosis",
     "summarize_diagnosis_categories",
     "run_one_example_top2",
