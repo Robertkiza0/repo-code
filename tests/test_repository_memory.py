@@ -6,6 +6,7 @@ from memory.repository_memory import (
     build_repository_memory,
     format_candidate_memory_block,
     merge_relationships,
+    pool_attribute_usage,
     pool_relationships,
     pool_structural_relationships,
     query_memory,
@@ -91,40 +92,13 @@ class BuildRepositoryMemoryTest(unittest.TestCase):
         calls = [r for r in memory["relationships"] if r["relation"] == "calls" and r["target"] == "_format"]
         self.assertTrue(len(calls) >= 1)
 
-    def test_uses_attribute_relationship_for_attribute_access_outside_the_owning_class(self):
-        # "settings.token_repetition_penalty_max"-style access: a chunk
-        # elsewhere in the repo references an attribute by name, even
-        # though that name is never a class/function/method name on its own.
-        from indexer.models import Chunk
-
-        chunks = _chunks()
-        extra = Chunk(
-            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
-            type="function", name="uses_it", class_name=None,
-            signature="def uses_it(g):", docstring=None, imports=[],
-            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
-        ).to_dict()
-        chunks = chunks + [extra]
-
-        memory = build_repository_memory(chunks)
-        greeter_id = _chunk_id(chunks, "Greeter")
-        edges = [
-            r for r in memory["relationships"]
-            if r["relation"] == "uses_attribute" and r["source_chunk_id"] == "extra.py::uses_it::function:1-2"
-        ]
-        self.assertEqual(len(edges), 1)
-        self.assertEqual(edges[0]["target"], "default_greeting")
-        self.assertEqual(edges[0]["target_chunk_id"], greeter_id)
-
-    def test_class_does_not_get_a_uses_attribute_edge_to_its_own_attribute(self):
+    def test_does_not_derive_uses_attribute_globally(self):
+        # "uses_attribute" is deliberately pool-scoped only now (see
+        # PoolAttributeUsageTest below) -- a global attribute-name index is
+        # too noisy (common names collide across many unrelated classes).
         chunks = _chunks()
         memory = build_repository_memory(chunks)
-        greeter_id = _chunk_id(chunks, "Greeter")
-        self_edges = [
-            r for r in memory["relationships"]
-            if r["relation"] == "uses_attribute" and r["source_chunk_id"] == greeter_id and r["target_chunk_id"] == greeter_id
-        ]
-        self.assertEqual(self_edges, [])
+        self.assertEqual([r for r in memory["relationships"] if r["relation"] == "uses_attribute"], [])
 
     def test_relationships_carry_exact_chunk_id_provenance(self):
         # Two different "greet" chunks (module-level function vs.
@@ -302,6 +276,66 @@ class PoolStructuralRelationshipsTest(unittest.TestCase):
 
         edges = pool_structural_relationships(memory, [greeter_id, loud_greeter_id])
         self.assertEqual(edges, [])
+
+
+class PoolAttributeUsageTest(unittest.TestCase):
+    def _lookup(self, chunks):
+        return {c["chunk_id"]: c for c in chunks}
+
+    def test_finds_attribute_usage_when_both_chunks_are_in_the_pool(self):
+        from indexer.models import Chunk
+
+        chunks = _chunks()
+        extra = Chunk(
+            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
+            type="function", name="uses_it", class_name=None,
+            signature="def uses_it(g):", docstring=None, imports=[],
+            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
+        ).to_dict()
+        chunks = chunks + [extra]
+
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+        uses_it_id = "extra.py::uses_it::function:1-2"
+
+        edges = pool_attribute_usage(memory, self._lookup(chunks), [greeter_id, uses_it_id])
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["target"], "default_greeting")
+        self.assertEqual(edges[0]["target_chunk_id"], greeter_id)
+        self.assertEqual(edges[0]["source_chunk_id"], uses_it_id)
+
+    def test_no_edge_when_the_attribute_owner_is_outside_the_pool(self):
+        # Same scenario as above, but Greeter is NOT in the pool -- the
+        # whole point of pool-scoping: only resolve within what's given.
+        from indexer.models import Chunk
+
+        chunks = _chunks()
+        extra = Chunk(
+            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
+            type="function", name="uses_it", class_name=None,
+            signature="def uses_it(g):", docstring=None, imports=[],
+            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
+        ).to_dict()
+        chunks = chunks + [extra]
+
+        memory = build_repository_memory(chunks)
+        uses_it_id = "extra.py::uses_it::function:1-2"
+
+        edges = pool_attribute_usage(memory, self._lookup(chunks), [uses_it_id])
+        self.assertEqual(edges, [])
+
+    def test_class_does_not_get_a_uses_attribute_edge_to_its_own_attribute(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        greeter_id = _chunk_id(chunks, "Greeter")
+
+        edges = pool_attribute_usage(memory, self._lookup(chunks), [greeter_id])
+        self.assertEqual(edges, [])
+
+    def test_empty_pool_gives_no_edges(self):
+        chunks = _chunks()
+        memory = build_repository_memory(chunks)
+        self.assertEqual(pool_attribute_usage(memory, self._lookup(chunks), []), [])
 
 
 class MergeRelationshipsTest(unittest.TestCase):

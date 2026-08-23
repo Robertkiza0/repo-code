@@ -60,7 +60,10 @@ class ExtractChunkDependenciesTest(unittest.TestCase):
         uses_targets = {(u["symbol"], u["kind"]) for u in dependencies[loud_greeter_id]["uses"]}
         self.assertNotIn(("Greeter", "object"), uses_targets)
 
-    def test_uses_attribute_kind_for_cross_chunk_attribute_access(self):
+    def test_no_attribute_kind_uses_without_a_pool(self):
+        # Repo-wide (no pool_chunk_ids given) never produces kind="attribute"
+        # entries -- see module docstring for why (common attribute names
+        # collide across many unrelated classes at real-repo scale).
         chunks = _chunks()
         extra = Chunk(
             chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
@@ -70,7 +73,23 @@ class ExtractChunkDependenciesTest(unittest.TestCase):
         ).to_dict()
         chunks = chunks + [extra]
         dependencies = extract_chunk_dependencies(chunks)
+
+        for entry in dependencies.values():
+            self.assertFalse(any(u["kind"] == "attribute" for u in entry["uses"]))
+
+    def test_uses_attribute_kind_when_both_chunks_are_in_the_given_pool(self):
+        chunks = _chunks()
+        extra = Chunk(
+            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
+            type="function", name="uses_it", class_name=None,
+            signature="def uses_it(g):", docstring=None, imports=[],
+            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
+        ).to_dict()
+        chunks = chunks + [extra]
         greeter_id = _chunk_id(chunks, "Greeter")
+        pool = [greeter_id, "extra.py::uses_it::function:1-2"]
+
+        dependencies = extract_chunk_dependencies(chunks, pool_chunk_ids=pool)
 
         uses = dependencies["extra.py::uses_it::function:1-2"]["uses"]
         attr_uses = [u for u in uses if u["kind"] == "attribute"]
@@ -78,6 +97,21 @@ class ExtractChunkDependenciesTest(unittest.TestCase):
         self.assertEqual(attr_uses[0]["symbol"], "default_greeting")
         self.assertEqual(attr_uses[0]["owner_chunk_id"], greeter_id)
         self.assertEqual(attr_uses[0]["target"], f"{greeter_id}.default_greeting")
+
+    def test_uses_attribute_kind_absent_when_owner_is_outside_the_pool(self):
+        chunks = _chunks()
+        extra = Chunk(
+            chunk_id="extra.py::uses_it::function:1-2", file_path="extra.py", language="python",
+            type="function", name="uses_it", class_name=None,
+            signature="def uses_it(g):", docstring=None, imports=[],
+            source_code="def uses_it(g):\n    return g.default_greeting", start_line=1, end_line=2,
+        ).to_dict()
+        chunks = chunks + [extra]
+        pool = ["extra.py::uses_it::function:1-2"]  # Greeter (the owner) is NOT in the pool
+
+        dependencies = extract_chunk_dependencies(chunks, pool_chunk_ids=pool)
+        uses = dependencies["extra.py::uses_it::function:1-2"]["uses"]
+        self.assertFalse(any(u["kind"] == "attribute" for u in uses))
 
     def test_imports_resolves_symbol_to_the_defining_chunk(self):
         chunks = _chunks()
@@ -113,7 +147,7 @@ class ExtractChunkDependenciesTest(unittest.TestCase):
         import inspect
 
         sig = inspect.signature(extract_chunk_dependencies)
-        self.assertEqual(list(sig.parameters), ["chunks"])
+        self.assertEqual(list(sig.parameters), ["chunks", "pool_chunk_ids"])
 
 
 class AttachDependenciesTest(unittest.TestCase):

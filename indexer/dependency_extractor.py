@@ -3,14 +3,23 @@ chunks the existing indexer already produces, so they're inspectable
 directly in a persisted repo_index.json.
 
 Reuses memory.repository_memory's already-derived, already-tested
-relationship graph (calls, references, uses_attribute, depends_on,
-inherits) rather than re-deriving any of it -- this module only reshapes
-that graph into the requested per-chunk schema. The one genuinely new
-piece of resolution here is import-line -> specific-symbol-chunk matching
-("from model import Settings" -> the chunk_id defining Settings in
-model.py), which reuses retrieval.dependency_retriever's module-to-file
-resolution (parse_import_modules(), DependencyRetriever's module index)
-rather than re-deriving that either.
+relationship graph (calls, references, depends_on, inherits) rather than
+re-deriving any of it -- this module only reshapes that graph into the
+requested per-chunk schema. The one genuinely new piece of resolution here
+is import-line -> specific-symbol-chunk matching ("from model import
+Settings" -> the chunk_id defining Settings in model.py), which reuses
+retrieval.dependency_retriever's module-to-file resolution
+(parse_import_modules(), DependencyRetriever's module index) rather than
+re-deriving that either.
+
+"uses" (kind="attribute") -- e.g. "settings.token_repetition_penalty_max"
+-- is deliberately NOT derived repo-wide: a common attribute name (e.g.
+"config") can be defined by many unrelated classes across a whole repo
+(measured on turboderp/exllama: 9 different classes), so a repo-wide
+attribute index is too noisy to be useful. It's only resolved when an
+explicit `pool_chunk_ids` is passed, scoped to exactly that set (see
+memory.pool_attribute_usage()) -- chunks outside the given pool never get
+attribute-kind "uses" entries.
 
 Deliberately does NOT modify indexer.repo_parser.RepoParser or
 evaluation.cceval_adapter.locate_repo_index -- attach_dependencies() is a
@@ -19,15 +28,16 @@ or an already-loaded repo_index.json) to get back chunk dicts with a
 "dependencies" key added, then save/use that yourself. Every existing
 consumer of the current index format (retrieval, selection, generation)
 is unaffected either way, since this only ever adds a new key -- nothing
-existing is renamed or removed. selection/llm_selector.py is untouched.
+existing is renamed or removed. selection/llm_selector.py's non-memory
+path is untouched.
 
 Never uses groundtruth/right_context/evaluation information -- only the
 same chunks retrieval already operates on.
 """
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from memory.repository_memory import build_repository_memory
+from memory.repository_memory import build_repository_memory, pool_attribute_usage
 from retrieval.dependency_retriever import DependencyRetriever, parse_import_modules
 
 _FROM_IMPORT_SYMBOLS_RE = re.compile(r"^from\s+\.*[\w.]*\s*import\s+(.+)$")
@@ -81,7 +91,7 @@ def _resolve_imports_for_file(
     return resolved
 
 
-def extract_chunk_dependencies(chunks: List[Dict]) -> Dict[str, Dict]:
+def extract_chunk_dependencies(chunks: List[Dict], pool_chunk_ids: Optional[List[str]] = None) -> Dict[str, Dict]:
     """Returns {chunk_id: {"calls": [...], "uses": [...], "imports": [...],
     "inherits": [...]}}:
 
@@ -90,7 +100,10 @@ def extract_chunk_dependencies(chunks: List[Dict]) -> Dict[str, Dict]:
                   "kind": "object"|"attribute", "owner_chunk_id": chunk_id}]
                  (owner_chunk_id is only present for kind="attribute",
                   since "target" there is a synthetic "<owner>.<attr>"
-                  string, not itself a real chunk_id)
+                  string, not itself a real chunk_id) -- kind="attribute"
+                  entries ONLY appear for chunks in `pool_chunk_ids`, and
+                  only resolve against other chunks also in that pool (see
+                  module docstring for why this isn't repo-wide).
       imports:  [{"module": file_path_or_raw_module, "symbol": name,
                   "resolved_target": chunk_id|None}]
       inherits: [{"target": chunk_id, "symbol": name}]
@@ -113,7 +126,15 @@ def extract_chunk_dependencies(chunks: List[Dict]) -> Dict[str, Dict]:
             dependencies[source_chunk_id]["uses"].append(
                 {"target": r["target_chunk_id"], "symbol": r["target"], "kind": "object"}
             )
-        elif r["relation"] == "uses_attribute":
+        elif r["relation"] == "inherits":
+            dependencies[source_chunk_id]["inherits"].append({"target": r["target_chunk_id"], "symbol": r["target"]})
+
+    if pool_chunk_ids:
+        chunk_lookup = {c["chunk_id"]: c for c in chunks}
+        for r in pool_attribute_usage(memory, chunk_lookup, pool_chunk_ids):
+            source_chunk_id = r["source_chunk_id"]
+            if source_chunk_id not in dependencies:
+                continue
             owner_chunk_id = r["target_chunk_id"]
             dependencies[source_chunk_id]["uses"].append(
                 {
@@ -123,8 +144,6 @@ def extract_chunk_dependencies(chunks: List[Dict]) -> Dict[str, Dict]:
                     "owner_chunk_id": owner_chunk_id,
                 }
             )
-        elif r["relation"] == "inherits":
-            dependencies[source_chunk_id]["inherits"].append({"target": r["target_chunk_id"], "symbol": r["target"]})
 
     # imports: per-file, symbol-level resolution -- reuses
     # DependencyRetriever's module index rather than re-deriving it.
@@ -143,14 +162,15 @@ def extract_chunk_dependencies(chunks: List[Dict]) -> Dict[str, Dict]:
     return dependencies
 
 
-def attach_dependencies(chunks: List[Dict]) -> List[Dict]:
+def attach_dependencies(chunks: List[Dict], pool_chunk_ids: Optional[List[str]] = None) -> List[Dict]:
     """Returns NEW chunk dicts (shallow copies of the input, in the same
     order) each with a "dependencies" key added -- the existing chunk
     representation (chunk_id, file_path, type, name, signature, docstring,
     imports, source_code, ...) is otherwise completely untouched, and the
-    input list/dicts are not mutated.
+    input list/dicts are not mutated. `pool_chunk_ids` is passed straight
+    through to extract_chunk_dependencies() -- see its docstring.
     """
-    dependencies = extract_chunk_dependencies(chunks)
+    dependencies = extract_chunk_dependencies(chunks, pool_chunk_ids=pool_chunk_ids)
     return [{**chunk, "dependencies": dependencies[chunk["chunk_id"]]} for chunk in chunks]
 
 

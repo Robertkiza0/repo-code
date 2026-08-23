@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from memory.repository_memory import (
     format_candidate_memory_block,
     merge_relationships,
+    pool_attribute_usage,
     pool_relationships,
     pool_structural_relationships,
     query_memory,
@@ -197,6 +198,7 @@ class LLMSelector:
             pool_edges = merge_relationships(
                 pool_relationships(memory, candidate_ids),
                 pool_structural_relationships(memory, candidate_ids),
+                pool_attribute_usage(memory, self._chunk_lookup, candidate_ids),
             )
             all_relationships = merge_relationships(text_query["relationships"], pool_edges)
             symbols_found = sorted(

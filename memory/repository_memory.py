@@ -29,8 +29,74 @@ from retrieval.bm25_retriever import tokenize
 from retrieval.dependency_retriever import DependencyRetriever
 
 _ATTRIBUTE_ASSIGN_RE = re.compile(r"\bself\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)")
+_CLASS_BODY_ATTR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=(?!=)")
 _CLASS_BASES_RE = re.compile(r"class\s+\w+\s*\(([^)]*)\)")
 _STOPWORDS = set(keyword.kwlist) | {"self", "cls"}
+
+
+def _extract_class_level_attributes(source_code: str) -> List[str]:
+    """Class-BODY attribute declarations (e.g. "temperature = 0.95" or
+    "max_len: int = 10" directly in a class body, not inside __init__) --
+    a common pattern for simple settings/config classes, and NOT caught by
+    _ATTRIBUTE_ASSIGN_RE (which only matches "self.X ="). Found by
+    indentation: only lines at the SAME indent as the class body's first
+    statement are considered attributes -- lines indented further are
+    inside a nested method/block and are local variables, not attributes.
+    """
+    lines = source_code.splitlines()
+    if len(lines) < 2:
+        return []
+
+    body_indent = None
+    in_docstring = False
+    docstring_quote = None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if in_docstring:
+            if docstring_quote in stripped:
+                in_docstring = False
+            continue
+        if stripped.startswith(('"""', "'''")):
+            quote = stripped[:3]
+            if stripped.count(quote) < 2:  # opens but doesn't close on this line
+                in_docstring = True
+                docstring_quote = quote
+            continue
+        if stripped.startswith("#"):
+            continue
+        body_indent = len(line) - len(line.lstrip())
+        break
+
+    if body_indent is None:
+        return []
+
+    attrs = []
+    in_docstring = False
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if in_docstring:
+            if docstring_quote in stripped:
+                in_docstring = False
+            continue
+        if stripped.startswith(('"""', "'''")):
+            quote = stripped[:3]
+            if stripped.count(quote) < 2:
+                in_docstring = True
+                docstring_quote = quote
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent != body_indent:
+            continue
+        if stripped.startswith(("def ", "class ", "@", "#")):
+            continue
+        match = _CLASS_BODY_ATTR_RE.match(stripped)
+        if match:
+            attrs.append(match.group(1))
+    return attrs
 
 # Relations pointing the "reverse" direction of the ones stored in
 # memory["relationships"], used only when formatting a candidate block from
@@ -148,7 +214,8 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
     for chunk in chunks:
         if chunk["type"] != "class":
             continue
-        attributes = sorted(set(_ATTRIBUTE_ASSIGN_RE.findall(chunk.get("source_code") or "")))
+        source = chunk.get("source_code") or ""
+        attributes = sorted(set(_ATTRIBUTE_ASSIGN_RE.findall(source)) | set(_extract_class_level_attributes(source)))
         symbols[chunk["chunk_id"]]["attributes"] = attributes
         for attr in attributes:
             relationships.append(_edge(chunk["name"], chunk["chunk_id"], "defines_attribute", attr))
@@ -235,15 +302,15 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
     for chunk in chunks:
         name_to_chunk_ids.setdefault(chunk["name"].lower(), []).append(chunk["chunk_id"])
 
-    # attribute name (lowercased) -> [(owning class chunk_id, real attribute
-    # name), ...], for detecting "uses_attribute" edges -- e.g. a chunk
-    # whose source contains "settings.token_repetition_penalty_max" gets an
-    # edge to Settings via its attribute, even though "token_repetition_..."
-    # is never a class/function/method name on its own.
-    attr_owner_by_name: Dict[str, List[Tuple[str, str]]] = {}
-    for owner_chunk_id, info in symbols.items():
-        for attr in info["attributes"]:
-            attr_owner_by_name.setdefault(attr.lower(), []).append((owner_chunk_id, attr))
+    # NOTE: "uses_attribute" (a chunk referencing another chunk's attribute,
+    # e.g. "settings.token_repetition_penalty_max") is deliberately NOT
+    # derived globally here. A common attribute name (e.g. "config") can be
+    # defined by many unrelated classes across a whole repo -- measured on
+    # turboderp/exllama, "config" alone was shared by 9 different classes --
+    # so a repo-wide attribute-name index produces a lot of low-precision
+    # fan-out edges. See pool_attribute_usage() below: it resolves the same
+    # kind of edge, but only among a given candidate pool (typically
+    # 8-12 chunks), where that kind of name collision is rare in practice.
 
     call_re_cache: Dict[str, re.Pattern] = {}
 
@@ -289,21 +356,6 @@ def build_repository_memory(chunks: List[Dict]) -> Dict:
                     seen_edges.add(edge_key)
                     relationships.append(
                         _edge(chunk["name"], chunk["chunk_id"], relation, target_chunk["name"], target_chunk_id)
-                    )
-
-            # Independent of the symbol-name check above -- a token can be
-            # an attribute name without ever being a class/function/method
-            # name (e.g. "token_repetition_penalty_max").
-            if token in attr_owner_by_name:
-                for owner_chunk_id, real_attr_name in attr_owner_by_name[token]:
-                    if owner_chunk_id == chunk["chunk_id"]:
-                        continue  # a class referencing its own attribute isn't cross-chunk usage
-                    edge_key = f"{chunk['chunk_id']}|uses_attribute|{owner_chunk_id}|{real_attr_name}"
-                    if edge_key in seen_edges:
-                        continue
-                    seen_edges.add(edge_key)
-                    relationships.append(
-                        _edge(chunk["name"], chunk["chunk_id"], "uses_attribute", real_attr_name, owner_chunk_id)
                     )
 
     return {
@@ -367,6 +419,67 @@ def pool_structural_relationships(memory: Dict, candidate_chunk_ids: List[str]) 
                         "relation": "same_file",
                         "target": b["name"],
                         "target_chunk_id": b_id,
+                    }
+                )
+    return relationships
+
+
+def pool_attribute_usage(memory: Dict, chunk_lookup: Dict[str, Dict], candidate_chunk_ids: List[str]) -> List[Dict]:
+    """"uses_attribute" edges (a chunk's source referencing another chunk's
+    attribute by name, e.g. "settings.token_repetition_penalty_max")
+    computed only among members of the CURRENT candidate pool --
+    deliberately not derived globally in build_repository_memory() (see its
+    docstring): a common attribute name like "config" can be defined by
+    many unrelated classes across a whole repo (measured on
+    turboderp/exllama: 9 different classes), so a repo-wide attribute index
+    produces a lot of low-precision fan-out. Scoped to the pool (typically
+    8-12 candidates), that kind of collision is rare in practice.
+
+    `chunk_lookup` must map chunk_id -> the full chunk dict (needs
+    "source_code", which memory["symbols"] deliberately doesn't retain to
+    keep the built memory object itself lean) -- e.g. LLMSelector's own
+    self._chunk_lookup, already built from the same chunks.
+    """
+    pool_ids = list(dict.fromkeys(candidate_chunk_ids))
+    pool_set = set(pool_ids)
+
+    attr_owner_by_name: Dict[str, List[Tuple[str, str]]] = {}
+    for chunk_id in pool_ids:
+        info = memory["symbols"].get(chunk_id)
+        if info is None:
+            continue
+        for attr in info["attributes"]:
+            attr_owner_by_name.setdefault(attr.lower(), []).append((chunk_id, attr))
+
+    if not attr_owner_by_name:
+        return []
+
+    relationships = []
+    seen_edges: Set[str] = set()
+    for chunk_id in pool_ids:
+        chunk = chunk_lookup.get(chunk_id)
+        info = memory["symbols"].get(chunk_id)
+        if chunk is None or info is None:
+            continue
+        source_code = chunk.get("source_code") or ""
+        tokens = {t for t in tokenize(source_code) if t not in _STOPWORDS}
+        for token in tokens:
+            if token not in attr_owner_by_name:
+                continue
+            for owner_chunk_id, real_attr_name in attr_owner_by_name[token]:
+                if owner_chunk_id == chunk_id:
+                    continue  # a class referencing its own attribute isn't cross-chunk usage
+                edge_key = f"{chunk_id}|uses_attribute|{owner_chunk_id}|{real_attr_name}"
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                relationships.append(
+                    {
+                        "source": info["name"],
+                        "source_chunk_id": chunk_id,
+                        "relation": "uses_attribute",
+                        "target": real_attr_name,
+                        "target_chunk_id": owner_chunk_id,
                     }
                 )
     return relationships
